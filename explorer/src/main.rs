@@ -1,4 +1,4 @@
-mod api;
+// mod api;
 pub mod db;
 mod indexer;
 mod logging;
@@ -144,15 +144,16 @@ async fn main() -> Result<(), Error> {
 
         tracing::info!("starting rest task");
 
-        let rest = tokio::spawn(
-            async {
-                rest_service(state_rx, settings).await;
-                Ok(())
-            }
-            .instrument(span!(Level::INFO, "rest service")),
-        );
+        // let rest = tokio::spawn(
+        //     async {
+        //         rest_service(state_rx, settings).await;
+        //         Ok(())
+        //     }
+        //     .instrument(span!(Level::INFO, "rest service")),
+        // );
 
-        (bootstrap, vec![subscriptions, rest])
+        // (bootstrap, vec![subscriptions, rest])
+        (bootstrap, vec![subscriptions])
     };
 
     let interrupt_handler = tokio::spawn({
@@ -263,54 +264,54 @@ async fn bootstrap(mut sync_stream: Streaming<chain_watch::Block>) -> Result<Exp
     db.ok_or(BootstrapError::EmptyStream).map_err(Into::into)
 }
 
-async fn rest_service(mut state: broadcast::Receiver<GlobalState>, settings: Settings) {
-    tracing::info!("starting rest task, waiting for database to be ready");
-
-    let (rest_shutdown, rest_shutdown_signal) = oneshot::channel();
-    let (indexer_tx, indexer_rx) = oneshot::channel();
-
-    tokio::spawn(async move {
-        let mut indexer_tx = Some(indexer_tx);
-        loop {
-            match state.recv().await.unwrap() {
-                GlobalState::Bootstraping => continue,
-                GlobalState::Ready(i) => {
-                    if let Some(indexer_tx) = indexer_tx.take() {
-                        let _ = indexer_tx.send(i);
-                    } else {
-                        panic!("received ready event twice");
-                    }
-                }
-                GlobalState::ShuttingDown => {
-                    let _ = rest_shutdown.send(());
-                    break;
-                }
-            }
-        }
-    });
-
-    let db = indexer_rx.await.unwrap().db;
-
-    let api = api::filter(
-        db,
-        crate::db::Settings {
-            address_bech32_prefix: settings.address_bech32_prefix,
-        },
-    );
-
-    let binding_address = settings.binding_address;
-    let tls = settings.tls.clone();
-    let cors = settings.cors.clone();
-
-    tracing::info!("starting rest task, listening on {}", binding_address);
-
-    api::setup_cors(api, binding_address, tls, cors, async {
-        rest_shutdown_signal.await.unwrap()
-    })
-    .await;
-
-    tracing::info!("rest task finished");
-}
+// async fn rest_service(mut state: broadcast::Receiver<GlobalState>, settings: Settings) {
+//     tracing::info!("starting rest task, waiting for database to be ready");
+//
+//     let (rest_shutdown, rest_shutdown_signal) = oneshot::channel();
+//     let (indexer_tx, indexer_rx) = oneshot::channel();
+//
+//     tokio::spawn(async move {
+//         let mut indexer_tx = Some(indexer_tx);
+//         loop {
+//             match state.recv().await.unwrap() {
+//                 GlobalState::Bootstraping => continue,
+//                 GlobalState::Ready(i) => {
+//                     if let Some(indexer_tx) = indexer_tx.take() {
+//                         let _ = indexer_tx.send(i);
+//                     } else {
+//                         panic!("received ready event twice");
+//                     }
+//                 }
+//                 GlobalState::ShuttingDown => {
+//                     let _ = rest_shutdown.send(());
+//                     break;
+//                 }
+//             }
+//         }
+//     });
+//
+//     let db = indexer_rx.await.unwrap().db;
+//
+//     let api = api::filter(
+//         db,
+//         crate::db::Settings {
+//             address_bech32_prefix: settings.address_bech32_prefix,
+//         },
+//     );
+//
+//     let binding_address = settings.binding_address;
+//     let tls = settings.tls.clone();
+//     let cors = settings.cors.clone();
+//
+//     tracing::info!("starting rest task, listening on {}", binding_address);
+//
+//     api::setup_cors(api, binding_address, tls, cors, async {
+//         rest_shutdown_signal.await.unwrap()
+//     })
+//     .await;
+//
+//     tracing::info!("rest task finished");
+// }
 
 async fn process_subscriptions(
     state: broadcast::Receiver<GlobalState>,

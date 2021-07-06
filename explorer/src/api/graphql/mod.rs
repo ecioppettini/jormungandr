@@ -23,7 +23,7 @@ use self::{
 use self::{error::ApiError, scalars::Weight};
 use crate::db::indexing::{
     BlockProducer, EpochData, ExplorerAddress, ExplorerBlock, ExplorerTransaction, ExplorerVote,
-    ExplorerVotePlan, ExplorerVoteTally, StakePoolData,
+    ExplorerVotePlan, ExplorerVoteTally, SerializedExplorerTransaction, StakePoolData,
 };
 use crate::db::persistent_sequence::PersistentSequence;
 use crate::db::{ExplorerDb, Settings as ChainSettings};
@@ -718,7 +718,7 @@ impl From<InternalBlockDate> for BlockDate {
 pub struct Transaction {
     id: FragmentId,
     block_hashes: Vec<HeaderHash>,
-    contents: Option<ExplorerTransaction>,
+    contents: Option<SerializedTransaction>,
 }
 
 impl Transaction {
@@ -1379,8 +1379,7 @@ impl VotePlanStatus {
                         }
                         ExplorerVoteTally::Private { results, options } => {
                             TallyStatus::Private(TallyPrivateStatus {
-                                results: results
-                                    .map(|res| res.iter().map(Into::into).collect()),
+                                results: results.map(|res| res.iter().map(Into::into).collect()),
                                 options: options.into(),
                             })
                         }

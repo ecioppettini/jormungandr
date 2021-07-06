@@ -4,7 +4,9 @@ use chain_impl_mockchain::{
 };
 use thiserror::Error;
 
-#[derive(Debug, Error, Clone)]
+use super::indexing::SanakirjaError;
+
+#[derive(Debug, Error)]
 pub enum ExplorerError {
     #[error("block {0} not found in explorer")]
     BlockNotFound(HeaderHash),
@@ -18,6 +20,8 @@ pub enum ExplorerError {
     ChainLengthBlockAlreadyExists(ChainLength),
     #[error("the explorer's database couldn't be initialized: {0}")]
     BootstrapError(String),
+    #[error("sanakirja error")]
+    SanakirjaError(#[from] SanakirjaError),
 }
 
 pub type Result<T> = std::result::Result<T, ExplorerError>;
