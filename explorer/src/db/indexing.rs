@@ -1,6 +1,6 @@
 use super::error::ExplorerError;
 use byteorder::{BigEndian, LittleEndian};
-use chain_core::property::{Block as _, Fragment as _, Serialize};
+use chain_core::property::{Fragment as _, Serialize};
 use chain_impl_mockchain::{
     certificate::Certificate,
     config::ConfigParam,
@@ -9,11 +9,12 @@ use chain_impl_mockchain::{
     transaction::{self, InputEnum, Witness},
     value::Value,
 };
-use sanakirja::{btree, direct_repr, Commit, LoadPage, RootDb, Storable, UnsizedStorable};
-use std::{convert::TryInto, fmt, mem::size_of, path::Path, sync::Arc};
+use sanakirja::{btree, direct_repr, Commit, RootDb, Storable, UnsizedStorable};
+use std::convert::TryFrom;
+use std::{convert::TryInto, mem::size_of, path::Path, sync::Arc};
 use zerocopy::{
     byteorder::{U32, U64},
-    AsBytes, FromBytes, Unaligned,
+    AsBytes, FromBytes,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -147,7 +148,7 @@ direct_repr!(StakePoolMeta);
 pub type SlotId = B32;
 pub type EpochNumber = B32;
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, AsBytes, FromBytes)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, AsBytes, FromBytes)]
 #[repr(C)]
 pub struct BlockDate {
     pub epoch: EpochNumber,
@@ -171,8 +172,6 @@ pub struct BlockMeta {
     chain_length: ChainLength,
     date: BlockDate,
     parent_hash: BlockId,
-    total_input: L64,
-    total_output: L64,
 }
 
 direct_repr!(BlockMeta);
@@ -229,37 +228,12 @@ impl From<&chain_impl_mockchain::certificate::Proposal> for ExplorerVoteProposal
     fn from(p: &chain_impl_mockchain::certificate::Proposal) -> Self {
         ExplorerVoteProposal {
             proposal_id: StorableHash::from(<[u8; 32]>::from(p.external_id().clone())),
-            options: Options::from(p.options().choice_range().end),
+            options: p.options().choice_range().end,
         }
     }
 }
 
 direct_repr!(ExplorerVoteProposal);
-
-// TODO do proper vote tally
-// #[derive(Clone)]
-// pub enum ExplorerVoteTally {
-//     Public {
-//         results: Box<[Weight]>,
-//         options: Options,
-//     },
-//     Private {
-//         results: Option<Vec<Weight>>,
-//         options: Options,
-//     },
-// }
-
-// impl ExplorerAddress {
-//     pub fn to_single_account(&self) -> Option<Identifier> {
-//         match self {
-//             ExplorerAddress::New(address) => match address.kind() {
-//                 chain_addr::Kind::Single(key) => Some(key.clone().into()),
-//                 _ => None,
-//             },
-//             ExplorerAddress::Old(_) => None,
-//         }
-//     }
-// }
 
 pub(crate) type P<K, V> = btree::page::Page<K, V>;
 type Db<K, V> = btree::Db<K, V>;
@@ -354,14 +328,33 @@ pub struct Stability {
     last_stable_block: ChainLength,
 }
 
+impl Default for Stability {
+    fn default() -> Self {
+        Self {
+            epoch_stability_depth: L32::new(u32::MAX),
+            last_stable_block: ChainLength::new(0),
+        }
+    }
+}
+
+impl Stability {
+    pub fn set_epoch_stability_depth(&mut self, e: u32) {
+        self.epoch_stability_depth = L32::new(e);
+    }
+
+    pub fn get_epoch_stability_depth(&self) -> u32 {
+        self.epoch_stability_depth.get()
+    }
+}
+
 #[derive(Debug, AsBytes, FromBytes)]
 #[repr(C)]
-pub struct BooleanStaticSettings {
+pub struct StaticSettings {
     discrimination: L32,
     consensus: L32,
 }
 
-impl BooleanStaticSettings {
+impl StaticSettings {
     pub fn new() -> Self {
         Self {
             discrimination: L32::new(0),
@@ -403,7 +396,7 @@ impl BooleanStaticSettings {
     }
 }
 
-impl Default for BooleanStaticSettings {
+impl Default for StaticSettings {
     fn default() -> Self {
         Self::new()
     }
@@ -415,9 +408,12 @@ pub enum Root {
     Stability,
     BooleanStaticSettings,
     Blocks,
+    BlockTransactions,
     VotePlans,
     VotePlanProposals,
-    Transactions,
+    TransactionInputs,
+    TransactionOutputs,
+    TransactionCertificates,
     ChainLenghts,
     Tips,
     StakePoolData,
@@ -432,8 +428,11 @@ impl Pristine {
                 states: txn.root_db(Root::States as usize)?,
                 tips: txn.root_db(Root::Tips as usize)?,
                 chain_lengths: txn.root_db(Root::ChainLenghts as usize)?,
-                transactions: txn.root_db(Root::Transactions as usize)?,
+                transaction_inputs: txn.root_db(Root::TransactionInputs as usize)?,
+                transaction_outputs: txn.root_db(Root::TransactionOutputs as usize)?,
+                transaction_certificates: txn.root_db(Root::TransactionCertificates as usize)?,
                 blocks: txn.root_db(Root::Blocks as usize)?,
+                block_transactions: txn.root_db(Root::BlockTransactions as usize)?,
                 vote_plans: txn.root_db(Root::VotePlans as usize)?,
                 vote_plan_proposals: txn.root_db(Root::VotePlanProposals as usize)?,
                 stake_pool_data: txn.root_db(Root::StakePoolData as usize)?,
@@ -465,12 +464,29 @@ impl Pristine {
             } else {
                 btree::create_db_(&mut txn)?
             },
-            transactions: if let Some(db) = txn.root_db(Root::Transactions as usize) {
+            transaction_inputs: if let Some(db) = txn.root_db(Root::TransactionInputs as usize) {
+                db
+            } else {
+                btree::create_db_(&mut txn)?
+            },
+            transaction_outputs: if let Some(db) = txn.root_db(Root::TransactionOutputs as usize) {
+                db
+            } else {
+                btree::create_db_(&mut txn)?
+            },
+            transaction_certificates: if let Some(db) =
+                txn.root_db(Root::TransactionCertificates as usize)
+            {
                 db
             } else {
                 btree::create_db_(&mut txn)?
             },
             blocks: if let Some(db) = txn.root_db(Root::Blocks as usize) {
+                db
+            } else {
+                btree::create_db_(&mut txn)?
+            },
+            block_transactions: if let Some(db) = txn.root_db(Root::BlockTransactions as usize) {
                 db
             } else {
                 btree::create_db_(&mut txn)?
@@ -498,17 +514,33 @@ impl Pristine {
 pub type Txn = GenericTxn<::sanakirja::Txn<Arc<::sanakirja::Env>>>;
 pub type MutTxn<T> = GenericTxn<::sanakirja::MutTxn<Arc<::sanakirja::Env>, T>>;
 
-pub type Transactions = UDb<Pair<FragmentId, TxComponentTag>, TxComponent>;
+// pub type Transactions = UDb<Pair<FragmentId, TxComponentTag>, TxComponent>;
+// pub type TransactionCursor = btree::Cursor<
+//     Pair<FragmentId, TxComponentTag>,
+//     TxComponent,
+//     btree::page_unsized::Page<Pair<FragmentId, TxComponentTag>, TxComponent>,
+// >;
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-#[repr(u8)]
-pub enum TxComponentTag {
-    Input = 0,
-    Output,
-    Certificate,
-}
+pub type TransactionsInputs = Db<Pair<FragmentId, u8>, TransactionInput>;
+pub type TransactionInputsCursor = btree::Cursor<
+    Pair<FragmentId, u8>,
+    TransactionInput,
+    P<Pair<FragmentId, u8>, TransactionInput>,
+>;
 
-direct_repr!(TxComponentTag);
+pub type TransactionsOutputs = Db<Pair<FragmentId, u8>, TransactionOutput>;
+pub type TransactionOutputsCursor = btree::Cursor<
+    Pair<FragmentId, u8>,
+    TransactionOutput,
+    P<Pair<FragmentId, u8>, TransactionOutput>,
+>;
+
+pub type TransactionsCertificate = UDb<FragmentId, TransactionCertificate>;
+pub type TransactionsCertificateCursor = btree::Cursor<
+    FragmentId,
+    TransactionCertificate,
+    btree::page_unsized::Page<FragmentId, TransactionCertificate>,
+>;
 
 const fn max(a: usize, b: usize) -> usize {
     if a > b {
@@ -517,58 +549,6 @@ const fn max(a: usize, b: usize) -> usize {
         b
     }
 }
-
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
-#[repr(C)]
-pub struct TxComponent(
-    [u8; max(
-        std::mem::size_of::<TransactionInput>(),
-        max(
-            std::mem::size_of::<TransactionOutput>(),
-            std::mem::size_of::<TransactionCertificate>(),
-        ),
-    )],
-);
-
-impl TxComponent {
-    unsafe fn as_output(&self) -> &TransactionOutput {
-        std::mem::transmute(self.0.as_ptr() as *const TransactionOutput)
-    }
-
-    unsafe fn as_input(&self) -> &TransactionInput {
-        std::mem::transmute(self.0.as_ptr() as *const TransactionInput)
-    }
-
-    unsafe fn as_tagged_certificate(&self) -> &TransactionCertificate {
-        std::mem::transmute(self.0.as_ptr() as *const TransactionCertificate)
-    }
-
-    pub fn from_input(i: TransactionInput) -> Self {
-        let mut alloc = [0u8; size_of::<Self>()];
-        let bytes = i.as_bytes();
-        alloc.copy_from_slice(&bytes);
-
-        Self(alloc)
-    }
-
-    pub fn from_output(i: TransactionOutput) -> Self {
-        let mut alloc = [0u8; size_of::<Self>()];
-        let bytes = i.as_bytes();
-        alloc.copy_from_slice(&bytes);
-
-        Self(alloc)
-    }
-
-    pub fn from_tagged_certificate(i: TransactionCertificate) -> Self {
-        let mut alloc = [0u8; size_of::<Self>()];
-        let bytes = i.as_bytes();
-        alloc.copy_from_slice(&bytes);
-
-        Self(alloc)
-    }
-}
-
-direct_repr!(TxComponent);
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, AsBytes, FromBytes)]
 #[repr(C)]
@@ -598,22 +578,39 @@ impl From<&transaction::Input> for TransactionInput {
     }
 }
 
+impl From<&TransactionInput> for transaction::Input {
+    fn from(input: &TransactionInput) -> Self {
+        transaction::Input::new(
+            input.utxo_or_account,
+            Value(input.value.get()),
+            input.input_ptr,
+        )
+    }
+}
+
 direct_repr!(TransactionInput);
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, AsBytes, FromBytes)]
 #[repr(C)]
 pub struct TransactionOutput {
-    pub idx: u8,
     pub address: Address,
     pub value: L64,
 }
 
 impl TransactionOutput {
-    pub fn from_original(idx: u8, output: &transaction::Output<chain_addr::Address>) -> Self {
+    pub fn from_original(output: &transaction::Output<chain_addr::Address>) -> Self {
         TransactionOutput {
-            idx,
             address: Address::from(output.address.clone()),
             value: L64::new(output.value.0),
+        }
+    }
+}
+
+impl From<&TransactionOutput> for transaction::Output<chain_addr::Address> {
+    fn from(output: &TransactionOutput) -> Self {
+        transaction::Output {
+            address: output.address.clone().try_into().unwrap(),
+            value: Value(output.value.get()),
         }
     }
 }
@@ -682,20 +679,30 @@ pub struct PublicVoteCast {
 }
 
 pub type Blocks = Db<BlockId, BlockMeta>;
-pub type BlockTransactions = Db<BlockId, FragmentId>;
+pub type BlockTransactions = Db<BlockId, Pair<u8, FragmentId>>;
+pub type BlockTransactionsCursor =
+    btree::Cursor<BlockId, Pair<u8, FragmentId>, P<BlockId, Pair<u8, FragmentId>>>;
 pub type ChainLengths = Db<ChainLength, BlockId>;
+pub type ChainLengthsCursor = btree::Cursor<ChainLength, BlockId, P<ChainLength, BlockId>>;
 pub type VotePlans = UDb<VotePlanId, VotePlanMeta>;
 pub type VotePlanProposals = UDb<VotePlanId, Pair<u8, ExplorerVoteProposal>>;
 pub type StakePools = UDb<PoolId, StakePoolMeta>;
 pub type Tips = Db<Pair<B32, BlockId>, ()>;
+pub type TipsCursor = btree::Cursor<Pair<B32, BlockId>, (), P<Pair<B32, BlockId>, ()>>;
 
 // multiverse
 pub type States = Db<BlockId, SerializedStateRef>;
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
 #[repr(C)]
 pub struct AccountId([u8; chain_impl_mockchain::transaction::INPUT_PTR_SIZE]);
 direct_repr!(AccountId);
+
+impl std::fmt::Debug for AccountId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&hex::encode(self.0))
+    }
+}
 
 pub type ProposalIndex = u8;
 pub type ProposalId = Pair<VotePlanId, ProposalIndex>;
@@ -706,16 +713,17 @@ pub type BlocksInBranch = Db<ChainLength, BlockId>;
 pub type AddressId = SeqNum;
 pub type AddressIds = Db<Address, AddressId>;
 pub type AddressTransactions = Db<AddressId, Pair<SeqNum, FragmentId>>;
-// TODO: this could be the actual vote instead of the FragmentId
+pub type AddressTransactionsCursor =
+    btree::Cursor<AddressId, Pair<SeqNum, FragmentId>, P<AddressId, Pair<SeqNum, FragmentId>>>;
 pub type Votes = Db<ProposalId, Pair<SeqNum, Choice>>;
 
-// a strongly typed (and in-memory) version of SerializedStateRef
+// a typed (and in-memory) version of SerializedStateRef
 pub struct StateRef {
     stake_pool_blocks: StakePoolBlocks,
     stake_control: StakeControl,
     blocks: BlocksInBranch,
     address_id: AddressIds,
-    addresses: AddressTransactions,
+    address_transactions: AddressTransactions,
     votes: Votes,
     next_address_id: Option<SeqNum>,
 }
@@ -731,24 +739,40 @@ pub struct SerializedStateRef {
     pub votes: L64,
 }
 
+impl From<SerializedStateRef> for StateRef {
+    fn from(ser: SerializedStateRef) -> Self {
+        StateRef {
+            stake_pool_blocks: Db::from_page(ser.stake_pool_blocks.get()),
+            stake_control: Db::from_page(ser.stake_control.get()),
+            blocks: Db::from_page(ser.blocks.get()),
+            address_id: Db::from_page(ser.address_id.get()),
+            address_transactions: Db::from_page(ser.addresses.get()),
+            votes: Db::from_page(ser.votes.get()),
+            next_address_id: None,
+        }
+    }
+}
+
 type BlockId = StorableHash;
 
-impl Into<HeaderId> for BlockId {
-    fn into(self) -> HeaderId {
-        HeaderId::from(self.0)
+impl From<BlockId> for HeaderId {
+    fn from(val: BlockId) -> Self {
+        HeaderId::from(val.0)
     }
 }
 
 type FragmentId = StorableHash;
 type VotePlanId = StorableHash;
 
-#[derive(Debug, Clone, PartialOrd, Ord, PartialEq, Eq, AsBytes, FromBytes)]
+#[derive(Clone, PartialOrd, Ord, PartialEq, Eq, AsBytes, FromBytes)]
+#[cfg_attr(test, derive(Hash))]
 #[repr(C)]
 pub struct StorableHash([u8; 32]);
 
 direct_repr!(StorableHash);
 
 impl StorableHash {
+    const MIN: Self = StorableHash([0x00; 32]);
     const MAX: Self = StorableHash([0xff; 32]);
 }
 
@@ -766,6 +790,12 @@ impl From<[u8; 32]> for StorableHash {
     }
 }
 
+impl std::fmt::Debug for StorableHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&hex::encode(self.0))
+    }
+}
+
 pub struct GenericTxn<T: ::sanakirja::LoadPage<Error = ::sanakirja::Error> + ::sanakirja::RootPage>
 {
     #[doc(hidden)]
@@ -774,8 +804,11 @@ pub struct GenericTxn<T: ::sanakirja::LoadPage<Error = ::sanakirja::Error> + ::s
     pub states: States,
     pub tips: Tips,
     pub chain_lengths: ChainLengths,
-    pub transactions: Transactions,
+    pub transaction_inputs: TransactionsInputs,
+    pub transaction_outputs: TransactionsOutputs,
+    pub transaction_certificates: TransactionsCertificate,
     pub blocks: Blocks,
+    pub block_transactions: BlockTransactions,
     pub vote_plans: VotePlans,
     pub vote_plan_proposals: VotePlanProposals,
     pub stake_pool_data: StakePools,
@@ -814,11 +847,12 @@ pub type PoolIdRecord = Pair<PoolId, SeqNum>;
 
 const MAX_ADDRESS_SIZE: usize = chain_addr::ADDR_SIZE_GROUP;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, AsBytes, FromBytes)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, AsBytes, FromBytes)]
 #[repr(C)]
 pub struct Address([u8; MAX_ADDRESS_SIZE]);
 
 impl Address {
+    const MIN: Address = Address([0u8; MAX_ADDRESS_SIZE]);
     const MAX: Address = Address([255u8; MAX_ADDRESS_SIZE]);
 }
 
@@ -844,7 +878,17 @@ impl TryInto<chain_addr::Address> for Address {
     type Error = chain_addr::Error;
 
     fn try_into(self) -> Result<chain_addr::Address, Self::Error> {
-        chain_addr::Address::from_bytes(self.0.as_ref())
+        chain_addr::Address::from_bytes(&self.0[0..33])
+            .or_else(|_| chain_addr::Address::from_bytes(&self.0[0..MAX_ADDRESS_SIZE]))
+    }
+}
+
+impl std::fmt::Debug for Address {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // let addr: chain_addr::Address = self.clone().try_into().unwrap();
+        // addr.fmt(f)
+        //
+        f.write_str(&hex::encode(self.0))
     }
 }
 
@@ -855,16 +899,21 @@ impl StateRef {
             + ::sanakirja::LoadPage<Error = ::sanakirja::Error>
             + ::sanakirja::RootPage,
     {
-        Self {
+        let mut s = Self {
             stake_pool_blocks: btree::create_db_(txn).unwrap(),
             stake_control: btree::create_db_(txn).unwrap(),
             blocks: btree::create_db_(txn).unwrap(),
             address_id: btree::create_db_(txn).unwrap(),
-            addresses: btree::create_db_(txn).unwrap(),
+            address_transactions: btree::create_db_(txn).unwrap(),
             votes: btree::create_db_(txn).unwrap(),
 
             next_address_id: None,
-        }
+        };
+
+        // TODO: extract [0u8; 65] to an Address::sigil function
+        btree::put(txn, &mut s.address_id, &Address([0u8; 65]), &SeqNum::new(0)).unwrap();
+
+        s
     }
 
     pub fn finish(mut self, txn: &mut SanakirjaMutTx) -> SerializedStateRef {
@@ -872,22 +921,21 @@ impl StateRef {
         if let Some(next_seq) = self.next_address_id {
             btree::del(txn, &mut self.address_id, &Address([0u8; 65]), None).unwrap();
 
-            btree::put(
+            debug_assert!(btree::put(
                 txn,
                 &mut self.address_id,
                 &Address([0u8; 65]),
                 &next_seq.next(),
             )
-            .unwrap();
+            .unwrap());
         }
 
-        // TODO: update address counter
         SerializedStateRef {
             stake_pool_blocks: L64::new(self.stake_pool_blocks.db),
             stake_control: L64::new(self.stake_control.db),
             blocks: L64::new(self.blocks.db),
             address_id: L64::new(self.address_id.db),
-            addresses: L64::new(self.addresses.db),
+            addresses: L64::new(self.address_transactions.db),
             votes: L64::new(self.votes.db),
         }
     }
@@ -924,6 +972,9 @@ impl StateRef {
         Ok(())
     }
 
+    /// Add the given transaction to address at the end of the list
+    /// This function *only* checks the last fragment to avoid repetition when a transaction has more
+    /// than one (input|output) with the same address (eg: utxo input and change).
     pub fn add_transaction_to_address(
         &mut self,
         txn: &mut SanakirjaMutTx,
@@ -937,20 +988,32 @@ impl StateRef {
             b: FragmentId::MAX,
         };
 
-        let seq = find_last_record_by(&*txn, &self.addresses, &address_id, &max_possible_value)
-            .map(|last| last.a.next())
-            .unwrap_or(SeqNum::MIN);
+        let seq = match find_last_record_by(
+            &*txn,
+            &self.address_transactions,
+            &address_id,
+            &max_possible_value,
+        ) {
+            Some(v) => {
+                if &v.b == fragment_id {
+                    return Ok(());
+                } else {
+                    v.a.next()
+                }
+            }
+            None => SeqNum::MIN,
+        };
 
-        btree::put(
+        debug_assert!(btree::put(
             txn,
-            &mut self.addresses,
+            &mut self.address_transactions,
             &address_id,
             &Pair {
                 a: seq,
                 b: fragment_id.clone(),
             },
         )
-        .unwrap();
+        .unwrap());
 
         Ok(())
     }
@@ -965,11 +1028,17 @@ impl StateRef {
         Ok(())
     }
 
-    fn get_or_insert_address_id(&mut self, txn: &SanakirjaMutTx, address: &Address) -> SeqNum {
+    pub(crate) fn get_or_insert_address_id(
+        &mut self,
+        txn: &mut SanakirjaMutTx,
+        address: &Address,
+    ) -> SeqNum {
         let address_exists = btree::get(txn, &self.address_id, address, None)
             .unwrap()
+            .filter(|(id, _)| id == &address)
             .map(|(_, v)| v)
             .cloned();
+
         let address_id = if let Some(v) = address_exists {
             v
         } else {
@@ -984,8 +1053,11 @@ impl StateRef {
 
             self.next_address_id = Some(next_seq.next());
 
+            btree::put(txn, &mut self.address_id, address, &next_seq).unwrap();
+
             next_seq
         };
+
         address_id
     }
 
@@ -995,13 +1067,13 @@ impl StateRef {
         output: &transaction::Output<chain_addr::Address>,
     ) -> Result<(), ExplorerError> {
         match output.address.kind() {
-            chain_addr::Kind::Single(account) => {
-                self.add_stake_to_account(txn, account, output.value);
-            }
             chain_addr::Kind::Group(_, account) => {
                 self.add_stake_to_account(txn, account, output.value);
             }
-            chain_addr::Kind::Account(_) => {}
+            chain_addr::Kind::Account(account) => {
+                self.add_stake_to_account(txn, account, output.value);
+            }
+            chain_addr::Kind::Single(_account) => {}
             chain_addr::Kind::Multisig(_) => {}
             chain_addr::Kind::Script(_) => {}
         }
@@ -1014,8 +1086,10 @@ impl StateRef {
         account: &chain_crypto::PublicKey<chain_crypto::Ed25519>,
         value: Value,
     ) {
-        let op =
-            |current_stake: u64, value: u64| -> u64 { current_stake.checked_add(value).unwrap() };
+        dbg!("adding transaction to account");
+        let op = |current_stake: u64, value: u64| -> u64 {
+            dbg!(current_stake).checked_add(dbg!(value)).unwrap()
+        };
 
         self.update_stake_for_account(txn, account, op, value);
     }
@@ -1026,8 +1100,10 @@ impl StateRef {
         account: &chain_crypto::PublicKey<chain_crypto::Ed25519>,
         value: Value,
     ) {
-        let op =
-            |current_stake: u64, value: u64| -> u64 { current_stake.checked_sub(value).unwrap() };
+        dbg!("adding transaction to account");
+        let op = |current_stake: u64, value: u64| -> u64 {
+            dbg!(current_stake).checked_sub(dbg!(value)).unwrap()
+        };
 
         self.update_stake_for_account(txn, account, op, value);
     }
@@ -1043,10 +1119,16 @@ impl StateRef {
 
         let current_stake = btree::get(txn, &self.stake_control, &account_id, None)
             .unwrap()
-            .map(|(_, stake)| stake.get())
+            .and_then(|(k, stake)| {
+                if dbg!(k) == dbg!(&account_id) {
+                    Some(stake.get())
+                } else {
+                    None
+                }
+            })
             .unwrap_or(0);
 
-        let new_stake = op(current_stake, value.0);
+        let new_stake = dbg!(op(current_stake, value.0));
 
         btree::del(txn, &mut self.stake_control, &account_id, None).unwrap();
         btree::put(
@@ -1070,7 +1152,8 @@ impl SerializedStateRef {
             stake_control: btree::fork_db(txn, &Db::from_page(self.stake_control.get())).unwrap(),
             blocks: btree::fork_db(txn, &Db::from_page(self.blocks.get())).unwrap(),
             address_id: btree::fork_db(txn, &Db::from_page(self.address_id.get())).unwrap(),
-            addresses: btree::fork_db(txn, &Db::from_page(self.addresses.get())).unwrap(),
+            address_transactions: btree::fork_db(txn, &Db::from_page(self.addresses.get()))
+                .unwrap(),
             votes: btree::fork_db(txn, &Db::from_page(self.votes.get())).unwrap(),
             next_address_id: None,
         }
@@ -1080,56 +1163,134 @@ impl SerializedStateRef {
 direct_repr!(SerializedStateRef);
 
 impl MutTxn<()> {
-    pub fn initialize(
+    pub fn add_block0(
         &mut self,
-        block_id: HeaderId,
-        initial: impl Iterator<Item = Fragment>,
+        parent_id: &BlockId,
+        block0_id: &BlockId,
+        fragments: impl Iterator<Item = Fragment>,
     ) -> Result<(), ExplorerError> {
-        let block_id = StorableHash::from(block_id);
-        let empty_state = StateRef::new_empty(&mut self.txn);
-        let new_state = &empty_state.finish(&mut self.txn);
+        let state_ref = StateRef::new_empty(&mut self.txn);
 
-        let Self {
-            txn,
-            states,
-            tips,
-            chain_lengths,
-            transactions,
-            blocks,
-            vote_plans,
-            vote_plan_proposals,
-            stake_pool_data,
-        } = self;
+        unsafe {
+            self.txn.set_root(
+                Root::Stability as usize,
+                std::mem::transmute(Stability::default()),
+            )
+        };
 
-        btree::put(txn, states, &block_id, &new_state).unwrap();
+        let tip = Pair {
+            a: B32::new(0),
+            b: block0_id.clone(),
+        };
+
+        assert!(btree::put(&mut self.txn, &mut self.tips, &tip, &()).unwrap());
+
+        self.update_state(
+            fragments,
+            state_ref,
+            ChainLength::new(0),
+            &block0_id,
+            BlockDate {
+                epoch: B32::new(0),
+                slot_id: B32::new(0),
+            },
+            &parent_id,
+        )?;
 
         Ok(())
     }
 
     pub fn add_block(
         &mut self,
-        parent_id: BlockId,
-        block_id: BlockId,
-        chain_length: u32,
+        parent_id: &BlockId,
+        block_id: &BlockId,
+        chain_length: ChainLength,
         block_date: BlockDate,
-        fragments: impl Iterator<Item = Fragment>,
+        fragments: impl IntoIterator<Item = Fragment>,
     ) -> Result<(), ExplorerError> {
-        let block_chain_length = ChainLength::new(chain_length);
+        self.update_tips(&parent_id, chain_length.clone(), &block_id)?;
 
         let states = btree::get(&self.txn, &self.states, &parent_id, None)
             .unwrap()
-            .filter(|(branch_id, _states)| *branch_id == &parent_id)
+            .filter(|(branch_id, _states)| *branch_id == parent_id)
             .map(|(_branch_id, states)| states)
             .cloned()
             .ok_or_else(|| ExplorerError::AncestorNotFound(block_id.clone().into()))?;
 
-        let mut state_ref = states.fork(&mut self.txn);
+        let state_ref = states.fork(&mut self.txn);
 
-        for fragment in fragments {
+        self.update_state(
+            fragments.into_iter(),
+            state_ref,
+            chain_length,
+            &block_id,
+            block_date,
+            parent_id,
+        )?;
+
+        Ok(())
+    }
+
+    fn update_state(
+        &mut self,
+        fragments: impl Iterator<Item = Fragment>,
+        mut state_ref: StateRef,
+        chain_length: ChainLength,
+        block_id: &StorableHash,
+        block_date: BlockDate,
+        parent_id: &StorableHash,
+    ) -> Result<(), ExplorerError> {
+        dbg!(format!(
+            "------------------- adding state for {:?} -------------",
+            &block_id
+        ));
+
+        self.apply_fragments(&block_id, fragments, &mut state_ref)?;
+        state_ref.add_block_to_blocks(&mut self.txn, &chain_length, &block_id)?;
+
+        let new_state = state_ref.finish(&mut self.txn);
+
+        if !btree::put(&mut self.txn, &mut self.states, &block_id, &new_state).unwrap() {
+            return Err(ExplorerError::BlockAlreadyExists(block_id.clone().into()));
+        }
+
+        self.update_chain_lengths(chain_length.clone(), &block_id)?;
+
+        self.add_block_meta(
+            block_id,
+            BlockMeta {
+                chain_length,
+                date: block_date,
+                parent_hash: parent_id.clone(),
+            },
+        )?;
+
+        Ok(())
+    }
+
+    fn apply_fragments(
+        &mut self,
+        block_id: &BlockId,
+        fragments: impl Iterator<Item = Fragment>,
+        state_ref: &mut StateRef,
+    ) -> Result<(), ExplorerError> {
+        for (idx, fragment) in fragments.enumerate() {
             let fragment_id = StorableHash::from(fragment.id());
+
+            btree::put(
+                &mut self.txn,
+                &mut self.block_transactions,
+                &block_id,
+                &Pair {
+                    a: u8::try_from(idx).expect("found more than 255 fragments in a block"),
+                    b: dbg!(fragment_id.clone()),
+                },
+            )
+            .unwrap();
+
             match &fragment {
                 Fragment::Initial(config_params) => {
-                    let mut settings = BooleanStaticSettings::new();
+                    let mut settings = StaticSettings::new();
                     let mut stability: Stability = unsafe {
                         std::mem::transmute(self.txn.root(Root::Stability as usize).unwrap())
                     };
@@ -1146,7 +1307,7 @@ impl MutTxn<()> {
                             ConfigParam::SlotsPerEpoch(_) => {}
                             ConfigParam::SlotDuration(_) => {}
                             ConfigParam::EpochStabilityDepth(c) => {
-                                stability.set_epoch_stability_depth(c);
+                                stability.set_epoch_stability_depth(*c);
                             }
                             ConfigParam::ConsensusGenesisPraosActiveSlotsCoeff(_) => {}
                             ConfigParam::BlockContentMaxSize(_) => {}
@@ -1169,34 +1330,43 @@ impl MutTxn<()> {
                             ConfigParam::PerVoteCertificateFees(_) => {}
                         }
                     }
+
+                    unsafe {
+                        self.txn
+                            .set_root(Root::Stability as usize, std::mem::transmute(stability));
+                        self.txn.set_root(
+                            Root::BooleanStaticSettings as usize,
+                            std::mem::transmute(settings),
+                        );
+                    }
                 }
                 Fragment::OldUtxoDeclaration(_) => {}
                 Fragment::Transaction(tx) => {
-                    self.apply_transaction(fragment_id, &tx, &mut state_ref)?;
+                    self.apply_transaction(fragment_id, &tx, state_ref)?;
                 }
                 Fragment::OwnerStakeDelegation(tx) => {
-                    self.apply_transaction(fragment_id, &tx, &mut state_ref)?;
+                    self.apply_transaction(fragment_id, &tx, state_ref)?;
                 }
                 Fragment::StakeDelegation(tx) => {
-                    self.apply_transaction(fragment_id, &tx, &mut state_ref)?;
+                    self.apply_transaction(fragment_id, &tx, state_ref)?;
                 }
                 Fragment::PoolRegistration(tx) => {
-                    self.apply_transaction(fragment_id, &tx, &mut state_ref)?;
+                    self.apply_transaction(fragment_id, &tx, state_ref)?;
                 }
                 Fragment::PoolRetirement(tx) => {
-                    self.apply_transaction(fragment_id, &tx, &mut state_ref)?;
+                    self.apply_transaction(fragment_id, &tx, state_ref)?;
                 }
                 Fragment::PoolUpdate(tx) => {
-                    self.apply_transaction(fragment_id, &tx, &mut state_ref)?;
+                    self.apply_transaction(fragment_id, &tx, state_ref)?;
                 }
                 Fragment::UpdateProposal(_) => {}
                 Fragment::UpdateVote(_) => {}
                 Fragment::VotePlan(tx) => {
-                    self.apply_transaction(fragment_id, &tx, &mut state_ref)?;
+                    self.apply_transaction(fragment_id, &tx, state_ref)?;
                     self.add_vote_plan_meta(tx);
                 }
                 Fragment::VoteCast(tx) => {
-                    self.apply_transaction(fragment_id.clone(), &tx, &mut state_ref)?;
+                    self.apply_transaction(fragment_id.clone(), &tx, state_ref)?;
 
                     let vote_cast = tx.as_slice().payload().into_payload();
                     let vote_plan_id =
@@ -1220,40 +1390,23 @@ impl MutTxn<()> {
                     }
                 }
                 Fragment::VoteTally(tx) => {
-                    self.apply_transaction(fragment_id, &tx, &mut state_ref)?;
+                    self.apply_transaction(fragment_id, &tx, state_ref)?;
                 }
                 Fragment::EncryptedVoteTally(tx) => {
-                    self.apply_transaction(fragment_id, &tx, &mut state_ref)?;
+                    self.apply_transaction(fragment_id, &tx, state_ref)?;
                 }
             }
 
             self.update_stake_pool_meta(&fragment)?;
         }
 
-        state_ref.add_block_to_blocks(&mut self.txn, &ChainLength::new(chain_length), &block_id)?;
-
-        let new_state = state_ref.finish(&mut self.txn);
-
-        if !btree::put(&mut self.txn, &mut self.states, &block_id, &new_state).unwrap() {
-            return Err(ExplorerError::BlockAlreadyExists(block_id.into()));
-        }
-
-        self.update_tips(&parent_id, block_chain_length.clone(), &block_id)?;
-
-        self.update_chain_lengths(block_chain_length.clone(), &block_id)?;
-
-        self.add_block_meta(
-            block_id,
-            BlockMeta {
-                chain_length: B32::new(block_chain_length.get()),
-                date: block_date,
-                parent_hash: parent_id,
-                total_input: L64::new(0),
-                total_output: L64::new(0),
-            },
-        )?;
-
         Ok(())
+    }
+
+    fn get_settings(&self) -> StaticSettings {
+        let raw = self.txn.root(Root::BooleanStaticSettings as usize).unwrap();
+
+        unsafe { std::mem::transmute(raw) }
     }
 
     fn add_vote_plan_meta(
@@ -1297,6 +1450,7 @@ impl MutTxn<()> {
         tx: &transaction::Transaction<P>,
         state: &mut StateRef,
     ) -> Result<(), ExplorerError> {
+        dbg!(tx);
         let etx = tx.as_slice();
 
         // is important that we put outputs first, because utxo's can refer to inputs in the same
@@ -1315,13 +1469,15 @@ impl MutTxn<()> {
             )?;
         }
 
-        for (input, witness) in etx.inputs_and_witnesses().iter() {
-            self.put_transaction_input(fragment_id.clone(), &input)
+        for (index, (input, witness)) in etx.inputs_and_witnesses().iter().enumerate() {
+            self.put_transaction_input(fragment_id.clone(), index as u8, &input)
                 .unwrap();
 
             let resolved_utxo = match input.to_enum() {
                 InputEnum::AccountInput(_, _) => None,
-                InputEnum::UtxoInput(input) => Some(self.resolve_utxo(&self.transactions, input)),
+                InputEnum::UtxoInput(input) => {
+                    Some(self.resolve_utxo(&self.transaction_outputs, input).clone())
+                }
             };
 
             self.apply_input_to_stake_control(&input, &witness, resolved_utxo.as_ref(), state)?;
@@ -1345,7 +1501,12 @@ impl MutTxn<()> {
         block_id: &BlockId,
     ) -> Result<(), ExplorerError> {
         let parent_key = Pair {
-            a: B32::new(chain_length.get() - 1),
+            a: B32::new(
+                chain_length
+                    .get()
+                    .checked_sub(1)
+                    .expect("update tips called with block0"),
+            ),
             b: parent_id.clone(),
         };
 
@@ -1380,16 +1541,17 @@ impl MutTxn<()> {
     pub fn put_transaction_input(
         &mut self,
         fragment_id: FragmentId,
+        index: u8,
         input: &transaction::Input,
     ) -> Result<(), ExplorerError> {
         btree::put(
             &mut self.txn,
-            &mut self.transactions,
+            &mut self.transaction_inputs,
             &Pair {
                 a: fragment_id,
-                b: TxComponentTag::Input,
+                b: index,
             },
-            &TxComponent::from_input(TransactionInput::from(input)),
+            &TransactionInput::from(input),
         )
         .unwrap();
 
@@ -1399,17 +1561,17 @@ impl MutTxn<()> {
     pub fn put_transaction_output(
         &mut self,
         fragment_id: FragmentId,
-        idx: u8,
+        index: u8,
         output: &transaction::Output<chain_addr::Address>,
     ) -> Result<(), ExplorerError> {
         btree::put(
             &mut self.txn,
-            &mut self.transactions,
+            &mut self.transaction_outputs,
             &Pair {
                 a: fragment_id,
-                b: TxComponentTag::Output,
+                b: index,
             },
-            &TxComponent::from_output(TransactionOutput::from_original(idx, output)),
+            &TransactionOutput::from_original(output),
         )
         .unwrap();
 
@@ -1423,12 +1585,9 @@ impl MutTxn<()> {
     ) -> Result<(), ExplorerError> {
         btree::put(
             &mut self.txn,
-            &mut self.transactions,
-            &Pair {
-                a: fragment_id,
-                b: TxComponentTag::Certificate,
-            },
-            &TxComponent::from_tagged_certificate(cert),
+            &mut self.transaction_certificates,
+            &fragment_id,
+            &cert,
         )
         .unwrap();
 
@@ -1500,10 +1659,10 @@ impl MutTxn<()> {
 
     pub fn add_block_meta(
         &mut self,
-        block_id: BlockId,
+        block_id: &BlockId,
         block: BlockMeta,
     ) -> Result<(), ExplorerError> {
-        btree::put(&mut self.txn, &mut self.blocks, &block_id, &block).unwrap();
+        btree::put(&mut self.txn, &mut self.blocks, block_id, &block).unwrap();
 
         Ok(())
     }
@@ -1558,8 +1717,7 @@ impl MutTxn<()> {
                         .into(),
                 );
 
-                // TODO: get this from the block0
-                let discrimination = chain_addr::Discrimination::Test;
+                let discrimination = self.get_settings().get_discrimination().unwrap();
                 let address = chain_addr::Address(discrimination, kind).into();
 
                 state.add_transaction_to_address(&mut self.txn, &fragment_id, &address)?;
@@ -1582,35 +1740,44 @@ impl MutTxn<()> {
         Ok(())
     }
 
+    // mostly used to retrieve the address of a utxo input (because it's embedded in the output)
+    // we need this mostly to know the addresses involved in a tx.
+    // but it is also used for stake/funds tracking, as we need to know how much to substract.
     fn resolve_utxo(
         &self,
-        transactions: &Transactions,
+        transactions: &TransactionsOutputs,
         utxo_pointer: transaction::UtxoPointer,
-    ) -> TransactionOutput {
+    ) -> &TransactionOutput {
         let txid = utxo_pointer.transaction_id;
         let idx = utxo_pointer.output_index;
 
         let mut cursor = btree::Cursor::new(&self.txn, &transactions).unwrap();
 
+        let key = Pair {
+            a: StorableHash::from(txid),
+            b: idx,
+        };
+
         cursor
             .set(
                 &self.txn,
-                &Pair {
-                    a: StorableHash::from(txid),
-                    b: TxComponentTag::Output,
-                },
-                Some(&TxComponent::from_output(TransactionOutput {
-                    idx,
-                    address: Address::MAX,
-                    value: L64::new(u64::MAX),
-                })),
+                &key,
+                Some(&TransactionOutput {
+                    // address: Address::MAX,
+                    address: Address::MIN,
+                    value: L64::new(u64::MIN),
+                }),
             )
             .unwrap();
 
-        if let Some((_, output)) = cursor.current(&self.txn).unwrap() {
-            unsafe { output.as_output().clone() }
+        if let Some((_, output)) = cursor
+            .current(&self.txn)
+            .unwrap()
+            .filter(|(k, _)| *k == &key)
+        {
+            output
         } else {
-            panic!("missing utxo")
+            panic!("missing utxo {:?}", txid)
         }
     }
 
@@ -1621,8 +1788,11 @@ impl MutTxn<()> {
             states,
             tips,
             chain_lengths,
-            transactions,
+            transaction_inputs,
+            transaction_outputs,
+            transaction_certificates,
             blocks,
+            block_transactions,
             vote_plans,
             vote_plan_proposals,
             stake_pool_data,
@@ -1631,8 +1801,14 @@ impl MutTxn<()> {
         txn.set_root(Root::States as usize, states.db);
         txn.set_root(Root::Tips as usize, tips.db);
         txn.set_root(Root::ChainLenghts as usize, chain_lengths.db);
-        txn.set_root(Root::Transactions as usize, transactions.db);
+        txn.set_root(Root::TransactionInputs as usize, transaction_inputs.db);
+        txn.set_root(Root::TransactionOutputs as usize, transaction_outputs.db);
+        txn.set_root(
+            Root::TransactionCertificates as usize,
+            transaction_certificates.db,
+        );
         txn.set_root(Root::Blocks as usize, blocks.db);
+        txn.set_root(Root::BlockTransactions as usize, block_transactions.db);
         txn.set_root(Root::VotePlans as usize, vote_plans.db);
         txn.set_root(Root::VotePlanProposals as usize, vote_plan_proposals.db);
         txn.set_root(Root::StakePoolData as usize, stake_pool_data.db);
@@ -1642,8 +1818,274 @@ impl MutTxn<()> {
 }
 
 impl Txn {
-    pub fn get() {
-        todo!();
+    pub fn get_transactions_by_address<'a>(
+        &'a self,
+        state_id: &StorableHash,
+        address: &Address,
+        cursor: Option<SeqNum>,
+    ) -> Result<Option<TxsByAddress<'a>>, ExplorerError> {
+        let state = btree::get(&self.txn, &self.states, &state_id, None).unwrap();
+
+        let state = match state {
+            Some((s, state)) if state_id == s => StateRef::from(state.clone()),
+            _ => return Ok(None),
+        };
+
+        let address_id = match btree::get(&self.txn, &state.address_id, &address, None).unwrap() {
+            Some((a, id)) if a == address => id,
+            _ => return Ok(None),
+        };
+
+        let max_possible_value = Pair {
+            a: cursor.unwrap_or(SeqNum::MAX),
+            b: FragmentId::MAX,
+        };
+
+        let mut cursor = btree::Cursor::new(&self.txn, &state.address_transactions).unwrap();
+
+        btree::get(
+            &self.txn,
+            &state.address_transactions,
+            &address_id,
+            Some(&Pair {
+                a: SeqNum::MAX,
+                b: FragmentId::MAX,
+            }),
+        )
+        .unwrap();
+
+        cursor
+            .set(&self.txn, &address_id, Some(&max_possible_value))
+            .unwrap();
+
+        if let Some((k, _)) = cursor.prev(&self.txn).unwrap() {
+            if k == address_id {
+                cursor.next(&self.txn).unwrap();
+            }
+        }
+
+        Ok(Some(TxsByAddress {
+            txn: &self.txn,
+            address_id: *address_id,
+            cursor,
+        }))
+    }
+
+    pub fn get_branches(&self) -> BranchIter {
+        let cursor = btree::Cursor::new(&self.txn, &self.tips).unwrap();
+        BranchIter {
+            txn: &self.txn,
+            cursor,
+        }
+    }
+
+    pub fn get_block_fragments(&self, block_id: &BlockId) -> BlockFragmentIter {
+        let mut cursor = btree::Cursor::new(&self.txn, &self.block_transactions).unwrap();
+        cursor.set(&self.txn, block_id, None).unwrap();
+
+        BlockFragmentIter {
+            txn: &self.txn,
+            block_id: block_id.clone(),
+            cursor,
+        }
+    }
+
+    pub fn get_fragment_inputs(
+        &self,
+        fragment_id: &FragmentId,
+        from: Option<u8>,
+    ) -> impl Iterator<Item = &TransactionInput> {
+        let mut cursor = btree::Cursor::new(&self.txn, &self.transaction_inputs).unwrap();
+        let key = Pair {
+            a: fragment_id.clone(),
+            b: from.unwrap_or(0),
+        };
+
+        cursor.set(&self.txn, &key, None).unwrap();
+
+        let iter = FragmentInputIter {
+            txn: &self.txn,
+            key,
+            cursor,
+        };
+
+        iter
+    }
+
+    pub fn get_fragment_outputs(
+        &self,
+        fragment_id: &FragmentId,
+        from: Option<u8>,
+    ) -> impl Iterator<Item = &TransactionOutput> {
+        let mut cursor = btree::Cursor::new(&self.txn, &self.transaction_outputs).unwrap();
+        let key = Pair {
+            a: fragment_id.clone(),
+            b: from.unwrap_or(0),
+        };
+
+        cursor.set(&self.txn, &key, None).unwrap();
+
+        let iter = FragmentOutputIter {
+            txn: &self.txn,
+            key,
+            cursor,
+        };
+
+        iter
+    }
+
+    pub fn get_fragment_certificate(
+        &self,
+        fragment_id: &FragmentId,
+    ) -> Option<&TransactionCertificate> {
+        let key = fragment_id.clone();
+
+        let certificate =
+            btree::get(&self.txn, &self.transaction_certificates, &key, None).unwrap();
+
+        certificate.and_then(|(k, v)| if k == &key { unsafe { Some(v) } } else { None })
+    }
+
+    pub fn get_blocks_by_chain_length(&self, chain_length: &ChainLength) -> ChainLengthIter {
+        let mut cursor = btree::Cursor::new(&self.txn, &self.chain_lengths).unwrap();
+
+        cursor.set(&self.txn, &chain_length, None).unwrap();
+
+        ChainLengthIter {
+            txn: &self.txn,
+            key: chain_length.clone(),
+            cursor,
+        }
+    }
+
+    pub fn get_block_meta(&self, block_id: &BlockId) -> Option<&BlockMeta> {
+        let certificate = btree::get(&self.txn, &self.blocks, &block_id, None).unwrap();
+
+        certificate.and_then(|(k, v)| if k == block_id { Some(v) } else { None })
+    }
+}
+
+pub struct TxsByAddress<'a> {
+    txn: &'a SanakirjaTx,
+    address_id: AddressId,
+    cursor: AddressTransactionsCursor,
+}
+
+impl<'a> Iterator for TxsByAddress<'a> {
+    type Item = FragmentId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.cursor.prev(self.txn).unwrap().and_then(|(k, v)| {
+            if k == &self.address_id {
+                Some(v.b.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    // TODO: can probably implement size_hint, last, first...
+}
+
+pub struct BranchIter<'a> {
+    txn: &'a SanakirjaTx,
+    cursor: TipsCursor,
+}
+
+impl<'a> Iterator for BranchIter<'a> {
+    type Item = FragmentId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.cursor
+            .next(self.txn)
+            .unwrap()
+            .map(|(k, _)| k.b.clone())
+    }
+}
+
+pub struct BlockFragmentIter<'a> {
+    txn: &'a SanakirjaTx,
+    block_id: BlockId,
+    cursor: BlockTransactionsCursor,
+}
+
+impl<'a> Iterator for BlockFragmentIter<'a> {
+    type Item = FragmentId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.cursor.next(self.txn).unwrap().and_then(|(k, v)| {
+            if k == &self.block_id {
+                Some(v.b.clone())
+            } else {
+                None
+            }
+        })
+    }
+}
+
+pub struct FragmentInputIter<'a> {
+    txn: &'a SanakirjaTx,
+    key: Pair<FragmentId, u8>,
+    cursor: TransactionInputsCursor,
+}
+
+impl<'a> Iterator for FragmentInputIter<'a> {
+    type Item = &'a TransactionInput;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.cursor.next(self.txn).unwrap().and_then(
+            |(k, v)| {
+                if k == &self.key {
+                    Some(v)
+                } else {
+                    None
+                }
+            },
+        )
+    }
+}
+
+pub struct FragmentOutputIter<'a> {
+    txn: &'a SanakirjaTx,
+    key: Pair<FragmentId, u8>,
+    cursor: TransactionOutputsCursor,
+}
+
+impl<'a> Iterator for FragmentOutputIter<'a> {
+    type Item = &'a TransactionOutput;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.cursor.next(self.txn).unwrap().and_then(
+            |(k, v)| {
+                if k == &self.key {
+                    Some(v)
+                } else {
+                    None
+                }
+            },
+        )
+    }
+}
+
+pub struct ChainLengthIter<'a> {
+    txn: &'a SanakirjaTx,
+    key: ChainLength,
+    cursor: ChainLengthsCursor,
+}
+
+impl<'a> Iterator for ChainLengthIter<'a> {
+    type Item = &'a BlockId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.cursor.next(self.txn).unwrap().and_then(
+            |(k, v)| {
+                if k == &self.key {
+                    Some(v)
+                } else {
+                    None
+                }
+            },
+        )
     }
 }
 
@@ -1691,13 +2133,19 @@ fn find_last_record_by<T, K, V>(
     max_possible_value: &V,
 ) -> Option<V>
 where
-    K: Storable,
+    K: Storable + PartialEq,
     V: Storable + Clone + PartialEq,
     T: ::sanakirja::LoadPage<Error = ::sanakirja::Error>,
 {
     let mut cursor = btree::Cursor::new(txn, tree).unwrap();
 
     cursor.set(txn, key, Some(&max_possible_value)).unwrap();
+
+    if let Some((k, _)) = cursor.prev(txn).unwrap() {
+        if k == key {
+            cursor.next(txn).unwrap();
+        }
+    }
 
     assert!(
         cursor
@@ -1708,7 +2156,789 @@ where
         "ran out of sequence numbers"
     );
 
-    cursor.prev(txn).unwrap();
+    cursor
+        .current(txn)
+        .unwrap()
+        .and_then(|(k, v)| if k == key { Some(v.clone()) } else { None })
+}
 
-    cursor.current(txn).unwrap().map(|(_, v)| v.clone())
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use chain_addr::{self, Discrimination, Kind};
+    use chain_crypto::{AsymmetricKey, Ed25519, KeyPair};
+    use chain_impl_mockchain::{
+        chaintypes::ConsensusType,
+        fragment::ConfigParams,
+        transaction::{Input, Output, TransactionSignDataHash, TxBuilder},
+    };
+    use rand::SeedableRng;
+    use std::iter::FromIterator;
+
+    use super::*;
+
+    mod state {
+        use std::collections::HashMap;
+
+        use chain_crypto::{PublicKey, SecretKey};
+        use chain_impl_mockchain::transaction::{AccountIdentifier, UtxoPointer};
+        use rand::{
+            distributions::Standard,
+            prelude::{Distribution, IteratorRandom},
+            RngCore,
+        };
+
+        use super::*;
+        #[derive(Debug, Clone)]
+        pub enum TaggedKeyPair {
+            Utxo(KeyPair<Ed25519>),
+            Account(KeyPair<Ed25519>),
+        }
+
+        impl TaggedKeyPair {
+            fn to_address(&self) -> chain_addr::Address {
+                let kind = match self {
+                    TaggedKeyPair::Utxo(key_pair) => Kind::Single(key_pair.public_key().clone()),
+                    TaggedKeyPair::Account(key_pair) => {
+                        Kind::Account(key_pair.public_key().clone())
+                    }
+                };
+                chain_addr::Address(Discrimination::Test, kind)
+            }
+        }
+
+        #[derive(Debug, Clone)]
+        pub struct State {
+            pub block_id: BlockId,
+            pub block0_id: BlockId,
+            pub keys: Vec<TaggedKeyPair>,
+            pub utxo: BTreeMap<PublicKey<Ed25519>, BTreeSet<UtxoPointer>>,
+            pub accounts: BTreeMap<PublicKey<Ed25519>, Value>,
+            pub fragments: Vec<Fragment>,
+            pub transactions_by_address: BTreeMap<Address, Vec<FragmentId>>,
+            pub parent: Option<BlockId>,
+        }
+
+        pub fn initial_state(nkeys: u8) -> State {
+            let block0_id = StorableHash([1u8; 32]);
+
+            let keys: Vec<TaggedKeyPair> = std::iter::repeat(())
+                .enumerate()
+                .map(|(i, _)| {
+                    let key = SecretKey::<Ed25519>::from_binary(&[i as u8; 32])
+                        .unwrap()
+                        .into();
+
+                    if i % 2 == 0 {
+                        TaggedKeyPair::Utxo(key)
+                    } else {
+                        TaggedKeyPair::Account(key)
+                    }
+                })
+                .take(nkeys as usize)
+                .collect();
+
+            let addresses = keys.iter().map(|key| key.to_address()).collect::<Vec<_>>();
+
+            let mut config_params = ConfigParams::new();
+
+            config_params.push(ConfigParam::ConsensusVersion(ConsensusType::GenesisPraos));
+            config_params.push(ConfigParam::Discrimination(
+                chain_addr::Discrimination::Test,
+            ));
+            config_params.push(ConfigParam::EpochStabilityDepth(2));
+
+            let mut initial_fragments = vec![Fragment::Initial(config_params)];
+
+            let mut utxo: BTreeMap<PublicKey<Ed25519>, BTreeSet<UtxoPointer>> = Default::default();
+            let mut accounts: BTreeMap<PublicKey<Ed25519>, Value> = Default::default();
+            let mut transactions_by_address: BTreeMap<Address, Vec<FragmentId>> = BTreeMap::new();
+
+            for (i, address) in addresses.iter().enumerate() {
+                let output = Output::from_address(address.clone(), Value(10000));
+
+                let tx = TxBuilder::new()
+                    .set_nopayload()
+                    .set_ios(&[], &[output])
+                    .set_witnesses_unchecked(&[])
+                    .set_payload_auth(&());
+
+                let fragment = Fragment::Transaction(tx);
+
+                transactions_by_address
+                    .entry(address.into())
+                    .or_default()
+                    .insert(0, fragment.id().into());
+
+                match &keys[i] {
+                    TaggedKeyPair::Utxo(key_pair) => {
+                        let utxo_pointer = UtxoPointer {
+                            transaction_id: fragment.id(),
+                            output_index: 0,
+                            value: Value(100000),
+                        };
+
+                        utxo.entry(key_pair.public_key().clone())
+                            .or_default()
+                            .insert(utxo_pointer);
+                    }
+                    TaggedKeyPair::Account(key_pair) => {
+                        accounts.insert(key_pair.public_key().clone(), Value(100000));
+                    }
+                }
+
+                initial_fragments.push(fragment);
+            }
+
+            State {
+                keys,
+                accounts,
+                utxo,
+                transactions_by_address,
+                fragments: initial_fragments,
+                block_id: block0_id.clone(),
+                block0_id,
+                parent: None,
+            }
+        }
+
+        #[derive(Debug, Clone)]
+        pub struct TransactionSpec {
+            pub from: Vec<(usize, u64)>,
+            pub to: Vec<usize>,
+        }
+
+        pub fn new_state(prev: &State, block_id: BlockId, spec: TransactionSpec) -> State {
+            let mut accounts = prev.accounts.clone();
+            let mut utxo = prev.utxo.clone();
+            let mut transactions_by_address = prev.transactions_by_address.clone();
+            let mut fragments: Vec<Fragment> = vec![];
+
+            let mut inputs = Vec::new();
+            let mut outputs = Vec::new();
+
+            let mut add_fragment_to = Vec::new();
+
+            for (id, val) in spec.from.iter().cloned() {
+                match &prev.keys[id] {
+                    TaggedKeyPair::Utxo(from) => {
+                        let utxo_set = utxo.get(from.public_key()).unwrap();
+
+                        if let Some(utxo_pointer) = utxo
+                            .get(from.public_key())
+                            .unwrap()
+                            .iter()
+                            .nth(val as usize % utxo_set.len())
+                            .cloned()
+                        {
+                            utxo.entry(from.public_key().clone()).and_modify(|v| {
+                                v.remove(&utxo_pointer);
+                            });
+
+                            let transfer = (val % utxo_pointer.value.0) + 1;
+
+                            if let Some(change) = utxo_pointer.value.0.checked_sub(transfer) {
+                                let change = Output::from_address(
+                                    TaggedKeyPair::Utxo(from.clone()).to_address(),
+                                    Value(change),
+                                );
+
+                                outputs.push(change);
+                            }
+
+                            let input = Input::from_utxo(utxo_pointer);
+
+                            inputs.push(input);
+                            add_fragment_to.push(id);
+                        }
+                    }
+                    TaggedKeyPair::Account(from) => {
+                        let funds = accounts.get_mut(&from.public_key()).unwrap();
+                        if funds.0 > 0 {
+                            let amount = (val as u64 % funds.0) + 1;
+
+                            *funds = funds.checked_sub(Value(amount)).unwrap();
+
+                            let input = Input::from_account_public_key(
+                                from.public_key().clone(),
+                                Value(amount),
+                            );
+
+                            inputs.push(input);
+                            add_fragment_to.push(id);
+                        }
+                    }
+                }
+            }
+
+            let total_input = inputs.iter().fold(Value(0), |accum, input| {
+                accum.checked_add(input.value()).unwrap()
+            });
+
+            let change_output = outputs.iter().fold(Value(0), |accum, output| {
+                accum.checked_add(output.value).unwrap()
+            });
+
+            let input_to_distribute = total_input.checked_sub(change_output).unwrap();
+            let input_per_part = input_to_distribute.0 / (spec.to.len() as u64);
+
+            for id in spec.to {
+                let to = &prev.keys[id];
+
+                let output = Output::from_address(to.to_address(), Value(input_per_part));
+
+                outputs.push(output);
+                add_fragment_to.push(id);
+            }
+
+            let tx_builder = TxBuilder::new()
+                .set_nopayload()
+                .set_ios(inputs.as_ref(), outputs.as_ref());
+
+            let sign_data_hash: TransactionSignDataHash =
+                tx_builder.get_auth_data_for_witness().hash();
+
+            let mut witnesses = Vec::new();
+
+            for (id, _) in spec.from.iter().cloned() {
+                match &prev.keys[id] {
+                    TaggedKeyPair::Utxo(key_pair) => witnesses.push(Witness::new_utxo(
+                        &HeaderId::from_bytes(prev.block0_id.0),
+                        &sign_data_hash,
+                        |data| key_pair.private_key().sign(data),
+                    )),
+                    TaggedKeyPair::Account(key_pair) => witnesses.push(Witness::new_account(
+                        &HeaderId::from_bytes(prev.block0_id.0),
+                        &sign_data_hash,
+                        // TODO: the explorer doesn't care about the spending counter, so it's find
+                        // to just set it always to 0, but we may need to change this, if we end up
+                        // using the actual ledger for this.
+                        0u32.into(),
+                        |data| key_pair.private_key().sign(data),
+                    )),
+                }
+            }
+
+            let tx = tx_builder
+                .set_witnesses_unchecked(witnesses.as_ref())
+                .set_payload_auth(&());
+
+            assert_eq!(tx.total_input(), tx.total_output());
+
+            let fragment = Fragment::Transaction(tx);
+            fragments.push(fragment.clone());
+
+            for output in outputs {
+                match output.address.kind() {
+                    Kind::Single(to) => {
+                        utxo.entry(to.clone()).and_modify(|v| {
+                            v.insert(UtxoPointer {
+                                transaction_id: fragment.id(),
+                                output_index: 0,
+                                value: output.value,
+                            });
+                        });
+                    }
+                    Kind::Group(_, _) => {}
+                    Kind::Account(to) => {
+                        accounts.entry(to.clone()).and_modify(|v| {
+                            *v = v.checked_add(output.value).unwrap();
+                        });
+                    }
+                    Kind::Multisig(_) => {}
+                    Kind::Script(_) => {}
+                }
+            }
+
+            for id in add_fragment_to {
+                transactions_by_address
+                    .entry(prev.keys[id].to_address().into())
+                    .or_default()
+                    .insert(0, fragment.id().into())
+            }
+
+            // let a = &prev.keys[a];
+            // let b = &prev.keys[b];
+
+            // match (&a, &b) {
+            //     (TaggedKeyPair::Utxo(ref from), to) => {
+            //         let utxo_set = utxo.get(from.public_key()).unwrap();
+
+            //         let utxo_pointer = *utxo
+            //             .get(from.public_key())
+            //             .unwrap()
+            //             .iter()
+            //             .nth(val % utxo_set.len())
+            //             .unwrap();
+
+            //         utxo.entry(from.public_key().clone()).and_modify(|v| {
+            //             v.remove(&utxo_pointer);
+            //         });
+
+            //         let amount = val as u64 % utxo_pointer.value.0;
+            //         let (fragment, outputs) =
+            //             make_utxo_tx(from, utxo_pointer, to, amount, &prev.block0_id);
+
+            //         for (i, output) in outputs.iter().enumerate() {
+            //             match output.address.kind() {
+            //                 Kind::Single(_) => {
+            //                     utxo.entry(from.public_key().clone()).and_modify(|v| {
+            //                         v.insert(UtxoPointer {
+            //                             transaction_id: fragment.id(),
+            //                             output_index: i as u8,
+            //                             value: outputs[i].value,
+            //                         });
+            //                     });
+            //                 }
+            //                 Kind::Group(_, _) => {}
+            //                 Kind::Account(_) => match to {
+            //                     TaggedKeyPair::Utxo(_) => {
+            //                         unreachable!("account key but utxo output")
+            //                     }
+            //                     TaggedKeyPair::Account(to) => {
+            //                         accounts.entry(to.public_key().clone()).and_modify(|v| {
+            //                             *v = v.checked_add(output.value).unwrap();
+            //                         });
+            //                     }
+            //                 },
+            //                 Kind::Multisig(_) => {}
+            //                 Kind::Script(_) => {}
+            //             }
+            //         }
+
+            //         fragments.push(fragment);
+            //     }
+
+            //     (TaggedKeyPair::Account(ref from), to) => {
+            //         let funds = accounts.get(&from.public_key()).unwrap();
+            //         let amount = val as u64 % funds.0;
+
+            //         let (fragment, output) = make_account_tx(from, &to, amount, &prev.block0_id);
+
+            //         accounts.entry(from.public_key().clone()).and_modify(|v| {
+            //             *v = v.checked_sub(Value(amount)).unwrap();
+            //         });
+
+            //         match output.address.kind() {
+            //             Kind::Single(_) => match to {
+            //                 TaggedKeyPair::Utxo(key_pair) => {
+            //                     utxo.entry(key_pair.public_key().clone()).and_modify(|v| {
+            //                         v.insert(UtxoPointer {
+            //                             transaction_id: fragment.id(),
+            //                             output_index: 0,
+            //                             value: output.value,
+            //                         });
+            //                     });
+            //                 }
+            //                 TaggedKeyPair::Account(_) => {
+            //                     unreachable!("utxo key but account output");
+            //                 }
+            //             },
+            //             Kind::Group(_, _) => {}
+            //             Kind::Account(_) => match to {
+            //                 TaggedKeyPair::Utxo(_) => {
+            //                     unreachable!("account key but utxo output")
+            //                 }
+            //                 TaggedKeyPair::Account(to) => {
+            //                     accounts.entry(to.public_key().clone()).and_modify(|v| {
+            //                         *v = v.checked_add(output.value).unwrap();
+            //                     });
+            //                 }
+            //             },
+            //             Kind::Multisig(_) => {}
+            //             Kind::Script(_) => {}
+            //         }
+
+            //         fragments.push(fragment);
+            //     }
+            // };
+
+            // for fragment in fragments.iter() {
+            //     transactions_by_address
+            //         .entry(dbg!(a.to_address().into()))
+            //         .or_default()
+            //         .insert(0, dbg!(fragment.id().into()));
+
+            //     transactions_by_address
+            //         .entry(dbg!(b.to_address().into()))
+            //         .or_default()
+            //         .insert(0, dbg!(fragment.id().into()));
+            // }
+
+            // dbg!("generated new test state---------------------------------------");
+
+            dbg!(State {
+                keys: prev.keys.clone(),
+                block0_id: prev.block0_id.clone(),
+                accounts,
+                utxo,
+                transactions_by_address,
+                fragments,
+                parent: Some(prev.block_id.clone()),
+                block_id,
+            })
+        }
+
+        #[test]
+        fn test_state() {
+            let initial_state = initial_state(10);
+            let block1_id = StorableHash([2u8; 32]);
+            let block2_id = StorableHash([3u8; 32]);
+            let block3_id = StorableHash([4u8; 32]);
+            let state1 = new_state(
+                &initial_state,
+                block1_id,
+                TransactionSpec {
+                    from: vec![(0, 100)],
+                    to: vec![1],
+                },
+            );
+
+            let state2 = new_state(
+                &initial_state,
+                block2_id,
+                TransactionSpec {
+                    from: vec![(3, 100)],
+                    to: vec![4],
+                },
+            );
+
+            let state3 = new_state(
+                &state2,
+                block3_id,
+                TransactionSpec {
+                    from: vec![(4, 1000)],
+                    to: vec![5],
+                },
+            );
+
+            dbg!(state1, state2, state3);
+            panic!("i want to see");
+        }
+    }
+
+    mod model {
+        use super::*;
+        use std::collections::BTreeMap;
+
+        #[derive(Default, Debug)]
+        pub struct Model {
+            pub states: BTreeMap<BlockId, state::State>,
+            pub tips: BTreeSet<(u32, BlockId)>,
+            pub fragments: BTreeMap<FragmentId, Fragment>,
+            pub blocks_by_chain_length: BTreeMap<u32, BTreeSet<BlockId>>,
+            pub block_meta: BTreeMap<BlockId, BlockMeta>,
+        }
+
+        impl Model {
+            pub const BLOCK0_PARENT_ID: StorableHash = StorableHash([0u8; 32]);
+            pub const BLOCK0_ID: StorableHash = StorableHash([1u8; 32]);
+
+            pub fn new() -> Model {
+                let initial_state = state::initial_state(10);
+
+                let fragments: BTreeMap<FragmentId, Fragment> = initial_state
+                    .fragments
+                    .iter()
+                    .map(|f| (f.id().into(), f.clone()))
+                    .collect();
+
+                let mut blocks_by_chain_length: BTreeMap<u32, BTreeSet<BlockId>> =
+                    Default::default();
+
+                blocks_by_chain_length
+                    .entry(0)
+                    .or_default()
+                    .insert(Self::BLOCK0_ID);
+
+                let mut block_meta = BTreeMap::new();
+
+                block_meta.insert(
+                    Self::BLOCK0_ID,
+                    BlockMeta {
+                        chain_length: ChainLength::new(0),
+                        date: BlockDate {
+                            epoch: EpochNumber::new(0),
+                            slot_id: SlotId::new(0),
+                        },
+                        parent_hash: Self::BLOCK0_PARENT_ID,
+                    },
+                );
+
+                Model {
+                    states: BTreeMap::from_iter(vec![(Self::BLOCK0_ID.clone(), initial_state)]),
+                    tips: BTreeSet::from_iter(vec![(0, Self::BLOCK0_ID)]),
+                    fragments,
+                    blocks_by_chain_length,
+                    block_meta,
+                }
+            }
+
+            pub fn add_block(
+                &mut self,
+                parent_id: &BlockId,
+                block_id: &BlockId,
+                block_date: &BlockDate,
+                chain_length: &ChainLength,
+                spec: state::TransactionSpec,
+            ) {
+                let parent_chain_length = chain_length.get().checked_sub(1).unwrap();
+                self.tips.remove(&(parent_chain_length, parent_id.clone()));
+
+                let previous_state = self
+                    .states
+                    .get(&parent_id)
+                    .cloned()
+                    .expect("parent not found");
+
+                let new_state = state::new_state(&previous_state, block_id.clone(), spec);
+
+                for fragment in new_state.fragments.iter() {
+                    self.fragments
+                        .insert(fragment.id().into(), fragment.clone());
+                }
+
+                self.states.insert(block_id.clone(), new_state);
+
+                self.blocks_by_chain_length
+                    .entry(chain_length.get())
+                    .or_default()
+                    .insert(block_id.clone());
+
+                self.block_meta.insert(
+                    block_id.clone(),
+                    BlockMeta {
+                        chain_length: chain_length.clone(),
+                        date: block_date.clone(),
+                        parent_hash: parent_id.clone(),
+                    },
+                );
+
+                self.tips.insert((chain_length.get(), block_id.clone()));
+            }
+
+            pub fn get_branches(&self) -> Vec<BlockId> {
+                self.tips.iter().map(|(_, v)| v.clone()).collect()
+            }
+
+            pub fn get_state_refs(&self) -> impl Iterator<Item = (&BlockId, &state::State)> {
+                self.states.iter()
+            }
+
+            pub fn get_blocks_by_chain_length(
+                &self,
+                chain_length: &ChainLength,
+            ) -> Option<&BTreeSet<BlockId>> {
+                self.blocks_by_chain_length.get(&chain_length.get())
+            }
+
+            pub fn get_block_meta(&self, block_id: &BlockId) -> Option<&BlockMeta> {
+                self.block_meta.get(block_id)
+            }
+
+            pub fn get_fragment(&self, fragment_id: &FragmentId) -> Option<&Fragment> {
+                self.fragments.get(fragment_id)
+            }
+        }
+    }
+
+    #[test]
+    fn sanakirja_test() {
+        let pristine = Pristine::new_anon().unwrap();
+        let mut model = model::Model::new();
+
+        let mut mut_tx = pristine.mut_txn_begin().unwrap();
+
+        let block0_id = StorableHash([1u8; 32]);
+        let block1_id = StorableHash([2u8; 32]);
+        let block1_date = BlockDate {
+            epoch: EpochNumber::new(0),
+            slot_id: SlotId::new(1),
+        };
+
+        let state = model.states.get(&model::Model::BLOCK0_ID).unwrap();
+
+        mut_tx
+            .add_block0(
+                &model::Model::BLOCK0_PARENT_ID,
+                &model::Model::BLOCK0_ID,
+                state.fragments.clone().into_iter(),
+            )
+            .unwrap();
+
+        model.add_block(
+            &block0_id,
+            &block1_id,
+            &block1_date,
+            &ChainLength::new(1),
+            state::TransactionSpec {
+                from: vec![(0, 5000)],
+                to: vec![3],
+            },
+        );
+
+        let branch1_id = StorableHash([2u8; 32]);
+        let branch2_id = StorableHash([3u8; 32]);
+        let branch3_id = StorableHash([4u8; 32]);
+
+        let branch_config: BTreeMap<BlockId, (BlockId, Vec<state::TransactionSpec>)> =
+            BTreeMap::from_iter([
+                (
+                    branch1_id.clone(),
+                    (
+                        block0_id.clone(),
+                        vec![state::TransactionSpec {
+                            from: vec![(0, 140), (5, 2500)],
+                            to: vec![3, 6],
+                        }],
+                    ),
+                ),
+                (
+                    branch2_id.clone(),
+                    (
+                        branch1_id.clone(),
+                        vec![state::TransactionSpec {
+                            from: vec![(1, 3000), (4, 5600)],
+                            to: vec![3, 2],
+                        }],
+                    ),
+                ),
+                (
+                    branch3_id.clone(),
+                    (
+                        block0_id.clone(),
+                        vec![state::TransactionSpec {
+                            from: vec![(0, 50000)],
+                            to: vec![7],
+                        }],
+                    ),
+                ),
+            ]);
+
+        for (branch_id, (parent, spec)) in branch_config {
+            let block_date = BlockDate {
+                epoch: B32::new(0),
+                slot_id: B32::new(1),
+            };
+
+            model.add_block(
+                &parent,
+                &branch_id,
+                &block_date,
+                &ChainLength::new(1),
+                spec[0].clone(),
+            );
+
+            let fragments = model.states.get(&branch_id).unwrap().fragments.clone();
+
+            mut_tx
+                .add_block(
+                    &parent,
+                    &branch_id,
+                    ChainLength::new(1),
+                    block_date,
+                    fragments,
+                )
+                .unwrap();
+        }
+
+        mut_tx.commit();
+
+        let txn = pristine.txn_begin().unwrap();
+
+        for (branch_id, branch) in model.get_state_refs() {
+            for (address, fragments) in branch.transactions_by_address.iter() {
+                assert_eq!(
+                    txn.get_transactions_by_address(&branch_id, dbg!(address), None)
+                        .unwrap()
+                        .map(|v| v.collect::<Vec<FragmentId>>()),
+                    Some(fragments.clone()),
+                );
+            }
+        }
+
+        assert_eq!(
+            txn.get_branches().collect::<Vec<BlockId>>(),
+            model.get_branches()
+        );
+
+        for block in [&block0_id, &branch1_id, &branch2_id, &branch3_id] {
+            assert_eq!(
+                txn.get_block_fragments(block).collect::<Vec<FragmentId>>(),
+                model
+                    .states
+                    .get(block)
+                    .unwrap()
+                    .fragments
+                    .iter()
+                    .map(|f| f.id().into())
+                    .collect::<Vec<FragmentId>>()
+            );
+
+            assert_eq!(txn.get_block_meta(block), model.get_block_meta(block));
+
+            for fragment_id in txn.get_block_fragments(block) {
+                let fragment = model.get_fragment(&fragment_id).unwrap();
+
+                match fragment {
+                    Fragment::Initial(_) => {}
+                    Fragment::UpdateProposal(_) => {}
+                    Fragment::UpdateVote(_) => {}
+                    Fragment::OldUtxoDeclaration(_) => {}
+                    Fragment::Transaction(tx) => assert_transaction(&txn, &fragment_id, tx),
+                    Fragment::OwnerStakeDelegation(tx) => {
+                        assert_transaction(&txn, &fragment_id, tx)
+                    }
+                    Fragment::StakeDelegation(tx) => assert_transaction(&txn, &fragment_id, tx),
+                    Fragment::PoolRegistration(tx) => assert_transaction(&txn, &fragment_id, tx),
+                    Fragment::PoolRetirement(tx) => assert_transaction(&txn, &fragment_id, tx),
+                    Fragment::PoolUpdate(tx) => assert_transaction(&txn, &fragment_id, tx),
+                    Fragment::VotePlan(tx) => assert_transaction(&txn, &fragment_id, tx),
+                    Fragment::VoteCast(tx) => assert_transaction(&txn, &fragment_id, tx),
+                    Fragment::VoteTally(tx) => assert_transaction(&txn, &fragment_id, tx),
+                    Fragment::EncryptedVoteTally(tx) => assert_transaction(&txn, &fragment_id, tx),
+                }
+
+                fn assert_transaction<P>(
+                    txn: &Txn,
+                    fragment_id: &FragmentId,
+                    tx: &transaction::Transaction<P>,
+                ) {
+                    let tx = tx.as_slice();
+                    for (real_input, explorer_input) in tx
+                        .inputs()
+                        .iter()
+                        .zip(txn.get_fragment_inputs(&fragment_id, None))
+                    {
+                        assert_eq!(real_input, explorer_input.into());
+                    }
+
+                    for (real_output, explorer_output) in tx
+                        .outputs()
+                        .iter()
+                        .zip(txn.get_fragment_outputs(&fragment_id, None))
+                    {
+                        assert_eq!(real_output, explorer_output.into());
+                    }
+                }
+            }
+        }
+
+        for chain_length in 0..=3 {
+            assert_eq!(
+                txn.get_blocks_by_chain_length(&ChainLength::new(chain_length))
+                    .cloned()
+                    .collect::<BTreeSet<_>>(),
+                model
+                    .get_blocks_by_chain_length(&ChainLength::new(chain_length))
+                    .map(Clone::clone)
+                    .unwrap_or_default(),
+            );
+        }
+
+        // pub type VotePlans = UDb<VotePlanId, VotePlanMeta>;
+        // pub type VotePlanProposals = UDb<VotePlanId, Pair<u8, ExplorerVoteProposal>>;
+        // pub type StakePools = UDb<PoolId, StakePoolMeta>;
+    }
 }
