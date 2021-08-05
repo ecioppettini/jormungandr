@@ -767,7 +767,7 @@ type VotePlanId = StorableHash;
 #[derive(Clone, PartialOrd, Ord, PartialEq, Eq, AsBytes, FromBytes)]
 #[cfg_attr(test, derive(Hash))]
 #[repr(C)]
-pub struct StorableHash([u8; 32]);
+pub struct StorableHash(pub [u8; 32]);
 
 direct_repr!(StorableHash);
 
