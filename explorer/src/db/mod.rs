@@ -1,4 +1,4 @@
-mod chain_storable;
+pub mod chain_storable;
 mod endian;
 pub mod error;
 mod helpers;

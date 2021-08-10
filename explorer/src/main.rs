@@ -1,4 +1,4 @@
-// mod api;
+mod api;
 pub mod db;
 mod indexer;
 mod logging;

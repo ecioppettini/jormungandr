@@ -287,6 +287,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "bit-set"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e11e16035ea35e4e5997b393eacbf6f63983188f7a2ad25bfb13465f5ad59de"
+dependencies = [
+ "bit-vec",
+]
+
+[[package]]
+name = "bit-vec"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "349f9b6a179ed607305526ca489b34ad0a41aed5f7980fa90eb03160b69598fb"
+
+[[package]]
 name = "bitflags"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -520,7 +535,7 @@ dependencies = [
  "lazy_static",
  "quickcheck",
  "quickcheck_macros",
- "rand_chacha 0.3.0",
+ "rand_chacha 0.3.1",
  "rand_core 0.6.2",
  "rayon",
  "sparse-array",
@@ -603,7 +618,6 @@ dependencies = [
 [[package]]
 name = "chain-watch"
 version = "0.1.0"
-source = "git+https://github.com/input-output-hk/chain-libs.git?branch=heterogeneous-client-api#51c061b37501319a408f5809cc55bb7a6e7f5069"
 dependencies = [
  "prost",
  "tonic",
@@ -1122,17 +1136,20 @@ dependencies = [
  "futures",
  "futures-channel",
  "futures-util",
+ "hex",
  "imhamt",
  "jormungandr-lib",
  "lazy_static",
  "parity-multiaddr",
+ "proptest",
  "rand 0.8.3",
- "rand_chacha 0.3.0",
+ "rand_chacha 0.3.1",
  "sanakirja",
  "serde",
  "serde_json",
  "serde_yaml",
  "structopt",
+ "test-strategy",
  "thiserror",
  "tokio",
  "tokio-stream",
@@ -1858,7 +1875,7 @@ dependencies = [
  "jormungandr-lib",
  "predicates",
  "rand 0.8.3",
- "rand_chacha 0.3.0",
+ "rand_chacha 0.3.1",
  "rayon",
  "reqwest",
  "serde",
@@ -1905,7 +1922,7 @@ dependencies = [
  "quickcheck",
  "quickcheck_macros",
  "rand 0.8.3",
- "rand_chacha 0.3.0",
+ "rand_chacha 0.3.1",
  "reqwest",
  "serde",
  "serde_derive",
@@ -1956,7 +1973,7 @@ dependencies = [
  "predicates",
  "prost",
  "rand 0.8.3",
- "rand_chacha 0.3.0",
+ "rand_chacha 0.3.1",
  "rand_core 0.6.2",
  "regex",
  "reqwest",
@@ -1998,7 +2015,7 @@ dependencies = [
  "quickcheck_macros",
  "rand 0.7.3",
  "rand 0.8.3",
- "rand_chacha 0.3.0",
+ "rand_chacha 0.3.1",
  "rand_core 0.6.2",
  "serde",
  "serde_json",
@@ -2034,7 +2051,7 @@ dependencies = [
  "parity-multiaddr",
  "poldercast",
  "rand 0.8.3",
- "rand_chacha 0.3.0",
+ "rand_chacha 0.3.1",
  "rand_core 0.6.2",
  "regex",
  "reqwest",
@@ -2087,7 +2104,7 @@ dependencies = [
  "qrcodegen",
  "quircs",
  "rand 0.8.3",
- "rand_chacha 0.3.0",
+ "rand_chacha 0.3.1",
  "rand_core 0.6.2",
  "regex",
  "reqwest",
@@ -2185,7 +2202,7 @@ checksum = "c5bf8dc22157c7a4d75f1df13a1b75ada82431141423e3d419ac89f2c1fbb298"
 dependencies = [
  "cryptoxide",
  "hex",
- "rand_chacha 0.3.0",
+ "rand_chacha 0.3.1",
  "rand_core 0.6.2",
  "thiserror",
 ]
@@ -2437,7 +2454,7 @@ dependencies = [
  "log",
  "mime",
  "mime_guess",
- "quick-error",
+ "quick-error 1.2.3",
  "rand 0.7.3",
  "safemem",
  "tempfile",
@@ -2913,6 +2930,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "proptest"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1e0d9cc07f18492d879586c92b485def06bc850da3118075cd45d50e9c95b0e5"
+dependencies = [
+ "bit-set",
+ "bitflags",
+ "byteorder",
+ "lazy_static",
+ "num-traits",
+ "quick-error 2.0.1",
+ "rand 0.8.3",
+ "rand_chacha 0.3.1",
+ "rand_xorshift",
+ "regex-syntax",
+ "rusty-fork",
+ "tempfile",
+]
+
+[[package]]
 name = "prost"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2974,6 +3011,12 @@ name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a1d01941d82fa2ab50be1e79e6714289dd7cde78eba4c074bc5a4374f650dfe0"
+
+[[package]]
+name = "quick-error"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
 
 [[package]]
 name = "quickcheck"
@@ -3047,7 +3090,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ef9e7e66b4468674bfcb0c81af8b7fa0bb154fa9f28eb840da5c447baeb8d7e"
 dependencies = [
  "libc",
- "rand_chacha 0.3.0",
+ "rand_chacha 0.3.1",
  "rand_core 0.6.2",
  "rand_hc 0.3.0",
 ]
@@ -3064,9 +3107,9 @@ dependencies = [
 
 [[package]]
 name = "rand_chacha"
-version = "0.3.0"
+version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e12735cf05c9e10bf21534da50a147b924d555dc7a547c42e6bb2d5b6017ae0d"
+checksum = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
 dependencies = [
  "ppv-lite86",
  "rand_core 0.6.2",
@@ -3104,6 +3147,15 @@ name = "rand_hc"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3190ef7066a446f2e7f42e239d161e905420ccab01eb967c9eb27d21b2322a73"
+dependencies = [
+ "rand_core 0.6.2",
+]
+
+[[package]]
+name = "rand_xorshift"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d25bf25ec5ae4a3f1b92f929810509a2f53d7dca2f50b794ff57e3face536c8f"
 dependencies = [
  "rand_core 0.6.2",
 ]
@@ -3274,6 +3326,18 @@ name = "rustversion"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61b3909d758bb75c79f23d4736fac9433868679d3ad2ea7a61e3c25cfda9a088"
+
+[[package]]
+name = "rusty-fork"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb3dcc6e454c328bb824492db107ab7c0ae8fcffe4ad210136ef014458c1bc4f"
+dependencies = [
+ "fnv",
+ "quick-error 1.2.3",
+ "tempfile",
+ "wait-timeout",
+]
 
 [[package]]
 name = "ryu"
@@ -3795,6 +3859,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "411c5bf740737c7918b8b1fe232dca4dc9f8e754b8ad5e20966814001ed0ac6b"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "test-strategy"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2328963c69243416e811c88066d18f670792b2e36e17fa57f4b1a124f85d18a8"
+dependencies = [
+ "proc-macro2 1.0.27",
+ "quote 1.0.9",
+ "syn 1.0.72",
 ]
 
 [[package]]

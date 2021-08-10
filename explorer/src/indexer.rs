@@ -40,7 +40,7 @@ impl Indexer {
         // blocks (siblings) in parallel, but that is a mission for another day.  biggest concern
         // is that the we receive two consecutive blocks, if the first is really big and costly to
         // apply, we may try to apply the next one too soon...
-        let _state_ref = self.db.apply_block(block.clone()).await?;
+        self.db.apply_block(block.clone()).await?;
 
         let mut guard = self.tip_candidate.lock().await;
         if guard.map(|hash| hash == block.header.id()).unwrap_or(false) {

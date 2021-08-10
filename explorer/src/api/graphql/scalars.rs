@@ -1,3 +1,5 @@
+use crate::db::SeqNum;
+
 use super::error::ApiError;
 use async_graphql::{Enum, InputValueError, InputValueResult, Scalar, ScalarType, SimpleObject};
 use chain_crypto::bech32::Bech32;
@@ -306,6 +308,12 @@ impl From<chain_time::TimeOffsetSeconds> for TimeOffsetSeconds {
 impl From<u32> for IndexCursor {
     fn from(number: u32) -> IndexCursor {
         IndexCursor(number.to_string())
+    }
+}
+
+impl From<SeqNum> for IndexCursor {
+    fn from(number: SeqNum) -> IndexCursor {
+        IndexCursor(u64::from(number).to_string())
     }
 }
 

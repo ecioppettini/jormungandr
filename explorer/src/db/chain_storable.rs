@@ -27,12 +27,6 @@ direct_repr!(ProposalId);
 
 pub type BlockId = StorableHash;
 
-impl From<BlockId> for HeaderId {
-    fn from(val: BlockId) -> Self {
-        HeaderId::from(val.0)
-    }
-}
-
 pub type FragmentId = StorableHash;
 pub type VotePlanId = StorableHash;
 
@@ -44,6 +38,12 @@ pub struct StorableHash(pub [u8; 32]);
 impl StorableHash {
     pub const fn new(bytes: [u8; 32]) -> Self {
         Self(bytes)
+    }
+}
+
+impl std::fmt::Display for StorableHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex::encode(self.0))
     }
 }
 
@@ -59,6 +59,12 @@ impl From<chain_impl_mockchain::key::Hash> for StorableHash {
         let bytes: [u8; 32] = id.into();
 
         Self(bytes)
+    }
+}
+
+impl From<StorableHash> for chain_impl_mockchain::key::Hash {
+    fn from(val: StorableHash) -> Self {
+        HeaderId::from(val.0)
     }
 }
 
@@ -105,13 +111,7 @@ direct_repr!(ChainLength);
 
 impl From<chain_impl_mockchain::block::ChainLength> for ChainLength {
     fn from(c: chain_impl_mockchain::block::ChainLength) -> Self {
-        Self(B32::new(u32::from(c)))
-    }
-}
-
-impl From<u32> for ChainLength {
-    fn from(n: u32) -> Self {
-        Self(B32::new(n))
+        Self(B32::new(u32::from(c.clone())))
     }
 }
 
