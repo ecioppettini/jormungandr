@@ -274,10 +274,8 @@ impl StateRef {
         account: &chain_crypto::PublicKey<chain_crypto::Ed25519>,
         value: Value,
     ) {
-        dbg!("adding transaction to account");
-        let op = |current_stake: u64, value: u64| -> u64 {
-            dbg!(current_stake).checked_add(dbg!(value)).unwrap()
-        };
+        let op =
+            |current_stake: u64, value: u64| -> u64 { current_stake.checked_add(value).unwrap() };
 
         self.update_stake_for_account(txn, account, op, value);
     }
@@ -288,10 +286,8 @@ impl StateRef {
         account: &chain_crypto::PublicKey<chain_crypto::Ed25519>,
         value: Value,
     ) {
-        dbg!("adding transaction to account");
-        let op = |current_stake: u64, value: u64| -> u64 {
-            dbg!(current_stake).checked_sub(dbg!(value)).unwrap()
-        };
+        let op =
+            |current_stake: u64, value: u64| -> u64 { current_stake.checked_sub(value).unwrap() };
 
         self.update_stake_for_account(txn, account, op, value);
     }
@@ -308,7 +304,7 @@ impl StateRef {
         let current_stake = btree::get(txn, &self.stake_control, &account_id, None)
             .unwrap()
             .and_then(|(k, stake)| {
-                if dbg!(k) == dbg!(&account_id) {
+                if k == &account_id {
                     Some(stake.get())
                 } else {
                     None
@@ -316,7 +312,7 @@ impl StateRef {
             })
             .unwrap_or(0);
 
-        let new_stake = dbg!(op(current_stake, value.0));
+        let new_stake = op(current_stake, value.0);
 
         btree::del(txn, &mut self.stake_control, &account_id, None).unwrap();
         btree::put(
@@ -326,6 +322,27 @@ impl StateRef {
             &L64::new(new_stake),
         )
         .unwrap();
+    }
+
+    pub fn drop(self, txn: &mut SanakirjaMutTx) -> Result<(), ExplorerError> {
+        let StateRef {
+            stake_pool_blocks,
+            stake_control,
+            blocks,
+            address_transactions,
+            address_id,
+            votes,
+            next_address_id,
+        } = self;
+
+        btree::drop(txn, stake_pool_blocks)?;
+        btree::drop(txn, stake_control)?;
+        btree::drop(txn, blocks)?;
+        btree::drop(txn, address_id)?;
+        btree::drop(txn, address_transactions)?;
+        btree::drop(txn, votes)?;
+
+        Ok(())
     }
 }
 

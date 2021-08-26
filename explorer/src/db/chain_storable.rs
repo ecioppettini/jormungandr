@@ -97,13 +97,20 @@ impl std::fmt::Debug for StorableHash {
 pub type SlotId = B32;
 pub type EpochNumber = B32;
 
-#[derive(Debug, Clone, AsBytes, FromBytes, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, AsBytes, FromBytes, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(C)]
 pub struct ChainLength(pub(super) B32);
 
 impl ChainLength {
+    pub const MAX: ChainLength = ChainLength(B32(zerocopy::U32::<byteorder::BigEndian>::MAX_VALUE));
+    pub const MIN: ChainLength = ChainLength(B32(zerocopy::U32::<byteorder::BigEndian>::ZERO));
+
     pub fn new(n: u32) -> Self {
         Self(B32::new(n))
+    }
+
+    pub fn get(&self) -> u32 {
+        self.0.get()
     }
 }
 
@@ -112,6 +119,12 @@ direct_repr!(ChainLength);
 impl From<chain_impl_mockchain::block::ChainLength> for ChainLength {
     fn from(c: chain_impl_mockchain::block::ChainLength) -> Self {
         Self(B32::new(u32::from(c.clone())))
+    }
+}
+
+impl From<ChainLength> for chain_impl_mockchain::block::ChainLength {
+    fn from(c: ChainLength) -> Self {
+        c.get().into()
     }
 }
 

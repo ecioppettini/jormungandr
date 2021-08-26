@@ -7,8 +7,8 @@ use super::{
     endian::{B32, L32, L64},
     error::ExplorerError,
     pagination::{
-        BlockFragmentsIter, FragmentContentId, FragmentInputIter, FragmentOutputIter,
-        SanakirjaCursorIter, TxsByAddress, VotePlanProposalsIter,
+        BlockFragmentsIter, BlocksInBranch, FragmentContentId, FragmentInputIter,
+        FragmentOutputIter, SanakirjaCursorIter, TxsByAddress, VotePlanProposalsIter,
     },
     pair::Pair,
     state_ref::SerializedStateRef,
@@ -29,6 +29,7 @@ use sanakirja::{
 };
 use std::convert::TryFrom;
 use std::{convert::TryInto, sync::Arc};
+use tracing::{debug, instrument, span, trace, Level};
 use zerocopy::{AsBytes, FromBytes};
 
 pub type Txn = GenericTxn<::sanakirja::Txn<Arc<::sanakirja::Env>>>;
@@ -226,6 +227,10 @@ impl MutTxn<()> {
         block0_id: &BlockId,
         fragments: impl Iterator<Item = &'a Fragment>,
     ) -> Result<(), ExplorerError> {
+        let span = span!(Level::DEBUG, "add_block0");
+        let _enter = span.enter();
+        debug!(?parent_id, ?block0_id);
+
         let state_ref = StateRef::new_empty(&mut self.txn);
 
         unsafe {
@@ -265,13 +270,59 @@ impl MutTxn<()> {
         block_date: BlockDate,
         fragments: impl IntoIterator<Item = &'a Fragment>,
     ) -> Result<(), ExplorerError> {
-        self.update_tips(&parent_id, chain_length.clone(), &block_id)?;
+        let span = span!(Level::DEBUG, "add_block");
+        let _enter = span.enter();
+        debug!(?parent_id, ?block_id, ?chain_length);
+
+        self.update_tips(&parent_id, chain_length, &block_id)?;
+
+        let mut cursor = btree::Cursor::new(&self.txn, &self.tips)?;
+        cursor.set_last(&self.txn)?;
+
+        let (tip, _) = cursor.prev(&self.txn)?.unwrap();
+
+        let tip = Some(tip).filter(|tip| &tip.b == block_id);
+
+        if let Some(tip) = tip {
+            let mut stability: Stability =
+                unsafe { std::mem::transmute(self.txn.root(Root::Stability as usize).unwrap()) };
+
+            if let Some(new_stable_chain_length) = tip
+                .a
+                .get()
+                .checked_sub(stability.epoch_stability_depth.get())
+            {
+                stability.last_stable_block = ChainLength::new(new_stable_chain_length);
+            }
+
+            if let Some(collect_at) = stability.last_stable_block.get().checked_sub(1) {
+                let mut iter = btree::iter(&self.txn, &self.chain_lengths, Some(collect_at));
+
+                for (_, block_id) in iter.take_while(|(_, chain_length)| chain_length, collect_at) {
+                    let states = btree::get(&self.txn, &self.states, &block_id, None)?
+                        .filter(|(branch_id, _states)| *branch_id == block_id)
+                        .map(|(_branch_id, states)| StateRef::from(states))
+                        .cloned()?;
+
+                    states.drop(&self.txn)?;
+                }
+            }
+
+            unsafe {
+                self.txn
+                    .set_root(Root::Stability as usize, std::mem::transmute(stability))
+            };
+        }
 
         let states = btree::get(&self.txn, &self.states, &parent_id, None)?
             .filter(|(branch_id, _states)| *branch_id == parent_id)
             .map(|(_branch_id, states)| states)
             .cloned()
-            .ok_or_else(|| ExplorerError::AncestorNotFound(block_id.clone().into()))?;
+            .ok_or_else(|| {
+                ExplorerError::AncestorNotFound(block_id.clone().into(), parent_id.clone().into())
+            })?;
+
+        debug!("forking states");
 
         let state_ref = states.fork(&mut self.txn);
 
@@ -296,16 +347,21 @@ impl MutTxn<()> {
         block_date: BlockDate,
         parent_id: &StorableHash,
     ) -> Result<(), ExplorerError> {
+        let span = span!(Level::DEBUG, "update_state");
+        let _enter = span.enter();
+        debug!(?block_id);
+
         self.apply_fragments(&block_id, fragments, &mut state_ref)?;
         state_ref.add_block_to_blocks(&mut self.txn, &chain_length, &block_id)?;
 
         let new_state = state_ref.finish(&mut self.txn);
 
+        debug!("adding new state");
         if !btree::put(&mut self.txn, &mut self.states, &block_id, &new_state)? {
             return Err(ExplorerError::BlockAlreadyExists(block_id.clone().into()));
         }
 
-        self.update_chain_lengths(chain_length.clone(), &block_id)?;
+        self.update_chain_lengths(chain_length, &block_id)?;
 
         self.add_block_meta(
             block_id,
@@ -564,6 +620,11 @@ impl MutTxn<()> {
         chain_length: ChainLength,
         block_id: &BlockId,
     ) -> Result<(), ExplorerError> {
+        let span = span!(Level::DEBUG, "update_tips");
+        let _enter = span.enter();
+
+        debug!(?parent_id, ?chain_length, ?block_id);
+
         let parent_key = Pair {
             a: B32::new(
                 chain_length
@@ -575,12 +636,16 @@ impl MutTxn<()> {
             b: parent_id.clone(),
         };
 
+        debug!(?parent_key);
+
         let _ = btree::del(&mut self.txn, &mut self.tips, &parent_key, None)?;
 
         let key = Pair {
             a: chain_length.0,
             b: block_id.clone(),
         };
+
+        debug!(?key);
 
         btree::put(&mut self.txn, &mut self.tips, &key, &())?;
 
@@ -877,6 +942,24 @@ impl Txn {
             &self.txn,
             address_id.into(),
             &state.address_transactions,
+        )?))
+    }
+
+    pub fn get_blocks<'a>(
+        &'a self,
+        state_id: &StorableHash,
+    ) -> Result<Option<BlocksInBranch>, ExplorerError> {
+        let state = btree::get(&self.txn, &self.states, &state_id, None)?;
+
+        let state = match state {
+            Some((s, state)) if state_id == s => StateRef::from(state.clone()),
+            _ => return Ok(None),
+        };
+
+        Ok(Some(SanakirjaCursorIter::new(
+            &self.txn,
+            (),
+            &state.blocks,
         )?))
     }
 

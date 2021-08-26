@@ -111,6 +111,8 @@ impl ScalarType for Value {
 
 pub type BlockCount = u64;
 pub type TransactionCount = u64;
+pub type TransactionOutputCount = u8;
+pub type TransactionInputCount = u8;
 pub type PoolCount = u64;
 pub type VotePlanStatusCount = u64;
 

@@ -117,6 +117,8 @@ impl ExplorerDb {
 
         mut_tx.add_block0(&parent_id.into(), &block_id.into(), block0.contents.iter())?;
 
+        mut_tx.commit()?;
+
         Ok(Self { pristine })
     }
 
@@ -137,6 +139,8 @@ impl ExplorerDb {
                 block.header.block_date().into(),
                 block.fragments(),
             )?;
+
+            mut_tx.commit()?;
 
             Ok(())
         })

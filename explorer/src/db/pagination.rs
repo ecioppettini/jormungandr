@@ -2,7 +2,8 @@ use sanakirja::{btree, Storable};
 
 use super::{
     chain_storable::{
-        BlockId, ExplorerVoteProposal, FragmentId, TransactionInput, TransactionOutput, VotePlanId,
+        BlockId, ChainLength, ExplorerVoteProposal, FragmentId, TransactionInput,
+        TransactionOutput, VotePlanId,
     },
     error::ExplorerError,
     pair::Pair,
@@ -22,6 +23,11 @@ impl PaginationCursor for u8 {
 impl PaginationCursor for SeqNum {
     const MIN: SeqNum = SeqNum::MIN;
     const MAX: SeqNum = SeqNum::MAX;
+}
+
+impl PaginationCursor for ChainLength {
+    const MIN: ChainLength = ChainLength::MIN;
+    const MAX: ChainLength = ChainLength::MAX;
 }
 
 pub trait MapEntry<'a, K, V, C> {
@@ -166,6 +172,7 @@ where
 
 pub type TxsByAddress<'a> =
     SanakirjaCursorIter<'a, SeqNum, Pair<SeqNum, FragmentId>, SeqNum, AddressId>;
+pub type BlocksInBranch<'a> = SanakirjaCursorIter<'a, ChainLength, BlockId, ChainLength, ()>;
 pub type FragmentInputIter<'a> = SanakirjaCursorIter<
     'a,
     Pair<FragmentId, u8>,
@@ -320,5 +327,21 @@ impl<'a> MapEntry<'a, Pair<VotePlanId, u8>, ExplorerVoteProposal, u8> for VotePl
             },
             None,
         )
+    }
+}
+
+impl<'a, K, V> MapEntry<'a, K, V, K> for ()
+where
+    V: 'a,
+    K: 'a + Clone,
+{
+    type Output = &'a V;
+
+    fn map_entry(&self, k: &'a K, v: &'a V) -> Option<(K, Self::Output)> {
+        Some((k.clone(), v))
+    }
+
+    fn map_cursor(&self, k: K) -> (K, Option<V>) {
+        (k, None)
     }
 }

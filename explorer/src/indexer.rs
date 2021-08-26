@@ -36,10 +36,6 @@ impl Indexer {
     pub async fn apply_block(&self, block: Block) -> Result<(), IndexerError> {
         tracing::info!("applying {}", block.header.id());
 
-        // TODO: technically this could dispatch a task, as there is a possibility of applying
-        // blocks (siblings) in parallel, but that is a mission for another day.  biggest concern
-        // is that the we receive two consecutive blocks, if the first is really big and costly to
-        // apply, we may try to apply the next one too soon...
         self.db.apply_block(block.clone()).await?;
 
         let mut guard = self.tip_candidate.lock().await;

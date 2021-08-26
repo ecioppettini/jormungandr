@@ -2,7 +2,7 @@ use byteorder::{BigEndian, LittleEndian};
 use sanakirja::{direct_repr, Storable, UnsizedStorable};
 use zerocopy::{AsBytes, FromBytes, U32, U64};
 
-#[derive(Debug, Clone, PartialEq, Eq, AsBytes, FromBytes)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, AsBytes, FromBytes)]
 #[repr(transparent)]
 pub struct B32(pub U32<BigEndian>);
 

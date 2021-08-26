@@ -10,8 +10,8 @@ use async_graphql::{
 
 use self::scalars::{
     BlockCount, ChainLength, EpochNumber, ExternalProposalId, IndexCursor, NonZero, PayloadType,
-    PoolCount, PoolId, PublicKey, Slot, TransactionCount, Value, VoteOptionRange,
-    VotePlanStatusCount,
+    PoolCount, PoolId, PublicKey, Slot, TransactionCount, TransactionOutputCount, Value,
+    VoteOptionRange, VotePlanStatusCount,
 };
 use self::{
     connections::{
@@ -21,7 +21,11 @@ use self::{
     scalars::VotePlanId,
 };
 use self::{error::ApiError, scalars::Weight};
-use crate::db::{self, schema::StakePoolMeta, ExplorerDb, SeqNum, Settings as ChainSettings};
+use crate::db::{
+    self,
+    schema::{StakePoolMeta, Txn},
+    ExplorerDb, SeqNum, Settings as ChainSettings,
+};
 use cardano_legacy_address::Addr as OldAddress;
 use certificates::*;
 use chain_impl_mockchain::key::BftLeaderId;
@@ -36,6 +40,7 @@ use std::sync::Arc;
 
 pub struct Branch {
     id: db::chain_storable::BlockId,
+    txn: Arc<Txn>,
 }
 
 #[Object]
@@ -56,12 +61,96 @@ impl Branch {
         after: Option<String>,
     ) -> FieldResult<Connection<IndexCursor, Block, ConnectionFields<BlockCount>, EmptyFields>>
     {
-        Err(ApiError::Unimplemented.into())
+        let id = self.id.clone();
+        let txn = Arc::clone(&self.txn.clone());
+
+        query(
+            after,
+            before,
+            first,
+            last,
+            move |after, before, first, last| async move {
+                tokio::task::spawn_blocking(move || {
+                    let connection = match txn
+                        .get_blocks(&id)
+                        .map_err(|_| ApiError::InternalDbError)?
+                    {
+                        Some(mut blocks) => {
+                            let boundaries =
+                                PaginationInterval::Inclusive(InclusivePaginationInterval {
+                                    lower_bound: u32::from(blocks.first_cursor().unwrap()),
+                                    upper_bound: u32::from(blocks.last_cursor().unwrap()),
+                                });
+
+                            let pagination_arguments = ValidatedPaginationArguments {
+                                first,
+                                last,
+                                before: before.map(TryInto::try_into).transpose()?,
+                                after: after.map(TryInto::try_into).transpose()?,
+                            };
+
+                            let (range, page_meta) =
+                                compute_interval(boundaries, pagination_arguments)?;
+
+                            let mut connection = Connection::with_additional_fields(
+                                page_meta.has_previous_page,
+                                page_meta.has_next_page,
+                                ConnectionFields {
+                                    total_count: page_meta.total_count,
+                                },
+                            );
+
+                            match range {
+                                PaginationInterval::Empty => unreachable!(),
+                                PaginationInterval::Inclusive(range) => {
+                                    let a = db::chain_storable::ChainLength::new(range.lower_bound);
+                                    let b = db::chain_storable::ChainLength::new(range.upper_bound);
+
+                                    blocks.seek(b).map_err(|_| ApiError::InternalDbError)?;
+
+                                    // TODO: don't unwrap
+                                    connection.append(
+                                        blocks
+                                            .rev()
+                                            .map(|i| i.unwrap())
+                                            .take_while(|(h, _)| h >= &a)
+                                            .map(|(h, id)| {
+                                                Edge::new(
+                                                    IndexCursor::from(h.get()),
+                                                    Block::from_valid_hash(
+                                                        id.clone(),
+                                                        Arc::clone(&txn),
+                                                    ),
+                                                )
+                                            }),
+                                    );
+                                }
+                            };
+
+                            connection
+                        }
+                        // TODO: this can't really happen
+                        None => Connection::with_additional_fields(
+                            false,
+                            false,
+                            ConnectionFields { total_count: 0 },
+                        ),
+                    };
+
+                    Ok::<
+                        Connection<IndexCursor, Block, ConnectionFields<BlockCount>, EmptyFields>,
+                        async_graphql::Error,
+                    >(connection)
+                })
+                .await
+                .unwrap()
+            },
+        )
+        .await
     }
 
     async fn transactions_by_address(
         &self,
-        context: &Context<'_>,
         address_bech32: String,
         first: Option<i32>,
         last: Option<i32>,
@@ -74,10 +163,9 @@ impl Branch {
             .map_err(|_| ApiError::InvalidAddress(address_bech32.to_string()))?
             .to_address();
 
-        let db = &extract_context(context).db;
-
-        let txn = db.get_txn().await.unwrap();
         let id = self.id.clone();
+
+        let txn = Arc::clone(&self.txn.clone());
 
         query(
             after,
@@ -91,40 +179,56 @@ impl Branch {
                         .map_err(|_| ApiError::InternalDbError)?
                     {
                         Some(mut txs) => {
-                            if let Some(first_cursor) = first {
-                                txs.seek(SeqNum::new(u64::try_from(first_cursor).unwrap()))
-                                    .map_err(|_| ApiError::InternalDbError)?;
+                            let boundaries =
+                                PaginationInterval::Inclusive(InclusivePaginationInterval {
+                                    lower_bound: u64::from(*txs.first_cursor().unwrap()),
+                                    upper_bound: u64::from(*txs.last_cursor().unwrap()),
+                                });
 
-                                txs.next_back();
-                            } else {
-                                txs.seek_end().map_err(|_| ApiError::InternalDbError)?;
-                            }
+                            let pagination_arguments = ValidatedPaginationArguments {
+                                first,
+                                last,
+                                before: before.map(TryInto::try_into).transpose()?,
+                                after: after.map(TryInto::try_into).transpose()?,
+                            };
 
-                            let last_cursor = before
-                                .map(|before| -> u64 { before.try_into() })
-                                .map(|before| SeqNum::new(before + 1))
-                                .unwrap_or(*txs.first_cursor().unwrap());
-
-                            let has_previous_page = false;
-                            let has_next_page = false;
-                            let total_count = TransactionCount::MIN;
+                            let (range, page_meta) =
+                                compute_interval(boundaries, pagination_arguments)?;
 
                             let mut connection = Connection::with_additional_fields(
-                                has_previous_page,
-                                has_next_page,
-                                ConnectionFields { total_count },
+                                page_meta.has_previous_page,
+                                page_meta.has_next_page,
+                                ConnectionFields {
+                                    total_count: page_meta.total_count,
+                                },
                             );
 
-                            // TODO: don't unwrap
-                            connection.append(txs.rev().map(|i| i.unwrap()).map(|(h, id)| {
-                                Edge::new(
-                                    IndexCursor::from(h),
-                                    Transaction {
-                                        id: id.clone(),
-                                        block_hashes: vec![],
-                                    },
-                                )
-                            }));
+                            match range {
+                                PaginationInterval::Empty => (),
+                                PaginationInterval::Inclusive(range) => {
+                                    let a = SeqNum::new(range.lower_bound);
+                                    let b = SeqNum::new(range.upper_bound);
+
+                                    txs.seek(b).map_err(|_| ApiError::InternalDbError)?;
+
+                                    // TODO: don't unwrap
+                                    connection.append(
+                                        txs.rev()
+                                            .map(|i| i.unwrap())
+                                            .take_while(|(h, _)| h >= &a)
+                                            .map(|(h, id)| {
+                                                Edge::new(
+                                                    IndexCursor::from(h),
+                                                    Transaction {
+                                                        id: id.clone(),
+                                                        block_hashes: vec![],
+                                                        txn: Arc::clone(&txn),
+                                                    },
+                                                )
+                                            }),
+                                    );
+                                }
+                            };
 
                             connection
                         }
@@ -178,12 +282,11 @@ impl Branch {
     /// Get a paginated view of all the blocks in this epoch
     pub async fn blocks_by_epoch(
         &self,
-        context: &Context<'_>,
-        epoch: EpochNumber,
-        first: Option<i32>,
-        last: Option<i32>,
-        before: Option<String>,
-        after: Option<String>,
+        _epoch: EpochNumber,
+        _first: Option<i32>,
+        _last: Option<i32>,
+        _before: Option<String>,
+        _after: Option<String>,
     ) -> FieldResult<
         Option<Connection<IndexCursor, Block, ConnectionFields<BlockCount>, EmptyFields>>,
     > {
@@ -193,6 +296,7 @@ impl Branch {
 
 pub struct Block {
     hash: db::chain_storable::BlockId,
+    txn: Arc<Txn>,
 }
 
 impl Block {
@@ -201,8 +305,8 @@ impl Block {
         todo!("validate that the block is in the database")
     }
 
-    fn from_valid_hash(hash: db::chain_storable::BlockId) -> Block {
-        Block { hash }
+    fn from_valid_hash(hash: db::chain_storable::BlockId, txn: Arc<Txn>) -> Block {
+        Block { hash, txn }
     }
 }
 
@@ -218,24 +322,114 @@ impl Block {
     }
 
     /// Date the Block was included in the blockchain
-    pub async fn date(&self, context: &Context<'_>) -> FieldResult<BlockDate> {
+    pub async fn date(&self) -> FieldResult<BlockDate> {
         Err(ApiError::Unimplemented.into())
     }
 
     /// The transactions contained in the block
     pub async fn transactions(
         &self,
-        context: &Context<'_>,
         first: Option<i32>,
         last: Option<i32>,
         before: Option<String>,
         after: Option<String>,
-    ) -> FieldResult<Connection<IndexCursor, Transaction, EmptyFields, EmptyFields>> {
-        Err(ApiError::Unimplemented.into())
+    ) -> FieldResult<
+        Connection<IndexCursor, Transaction, ConnectionFields<TransactionCount>, EmptyFields>,
+    > {
+        let id = self.hash.clone();
+        let txn = Arc::clone(&self.txn);
+        query(
+            after,
+            before,
+            first,
+            last,
+            move |after, before, first, last| async move {
+                tokio::task::spawn_blocking(move || {
+                    let mut txs = txn
+                        .get_block_fragments(&id)
+                        .map_err(|_| ApiError::InternalDbError)?;
+
+                    let boundaries = txs
+                        .first_cursor()
+                        .map(|first| {
+                            PaginationInterval::Inclusive(InclusivePaginationInterval {
+                                lower_bound: u64::from(*first),
+                                upper_bound: u64::from(*txs.last_cursor().unwrap()),
+                            })
+                        })
+                        .unwrap_or(PaginationInterval::Empty);
+
+                    let pagination_arguments = ValidatedPaginationArguments {
+                        first,
+                        last,
+                        before: before.map(TryInto::try_into).transpose()?,
+                        after: after.map(TryInto::try_into).transpose()?,
+                    };
+
+                    let (range, page_meta) = compute_interval(boundaries, pagination_arguments)?;
+
+                    let mut connection = Connection::with_additional_fields(
+                        page_meta.has_previous_page,
+                        page_meta.has_next_page,
+                        ConnectionFields {
+                            total_count: page_meta.total_count,
+                        },
+                    );
+
+                    match range {
+                        PaginationInterval::Empty => (),
+                        PaginationInterval::Inclusive(range) => {
+                            let a = u8::try_from(range.lower_bound).unwrap();
+                            let b = range.upper_bound;
+
+                            txs.seek(a).map_err(|_| ApiError::InternalDbError)?;
+
+                            // TODO: don't unwrap
+                            connection.append(
+                                txs.map(|i| i.unwrap())
+                                    .take_while(|(h, _)| (*h as u64) <= b)
+                                    .map(|(h, id)| {
+                                        Edge::new(
+                                            IndexCursor::from(h as u32),
+                                            Transaction {
+                                                id: id.clone(),
+                                                block_hashes: vec![],
+                                                txn: Arc::clone(&txn),
+                                            },
+                                        )
+                                    }),
+                            );
+                        }
+                    };
+
+                    Ok::<
+                        Connection<
+                            IndexCursor,
+                            Transaction,
+                            ConnectionFields<TransactionCount>,
+                            EmptyFields,
+                        >,
+                        async_graphql::Error,
+                    >(connection)
+                })
+                .await
+                .unwrap()
+            },
+        )
+        .await
     }
 
-    pub async fn chain_length(&self, context: &Context<'_>) -> FieldResult<ChainLength> {
-        Err(ApiError::Unimplemented.into())
+    pub async fn chain_length(&self) -> FieldResult<ChainLength> {
+        let id = self.hash.clone();
+        let txn = Arc::clone(&self.txn);
+        let chain_length = tokio::task::spawn_blocking(move || {
+            txn.get_block_meta(&id)
+                .map(|meta| ChainLength(meta.unwrap().chain_length.into()))
+        })
+        .await?
+        .unwrap();
+
+        Ok(chain_length)
     }
 
     pub async fn leader(&self, context: &Context<'_>) -> FieldResult<Option<Leader>> {
@@ -300,6 +494,7 @@ impl From<InternalBlockDate> for BlockDate {
 pub struct Transaction {
     id: db::chain_storable::FragmentId,
     block_hashes: Vec<HeaderHash>,
+    txn: Arc<Txn>,
 }
 
 /// A transaction in the blockchain
@@ -311,16 +506,111 @@ impl Transaction {
     }
 
     /// All the blocks this transaction is included in
-    pub async fn blocks(&self, context: &Context<'_>) -> FieldResult<Vec<Block>> {
+    pub async fn blocks(&self) -> FieldResult<Vec<Block>> {
         Err(ApiError::Unimplemented.into())
     }
 
-    pub async fn inputs(&self, context: &Context<'_>) -> FieldResult<Vec<TransactionInput>> {
+    pub async fn inputs(&self) -> FieldResult<Vec<TransactionInput>> {
         Err(ApiError::Unimplemented.into())
     }
 
-    pub async fn outputs(&self, context: &Context<'_>) -> FieldResult<Vec<TransactionOutput>> {
-        Err(ApiError::Unimplemented.into())
+    pub async fn outputs(
+        &self,
+        first: Option<i32>,
+        last: Option<i32>,
+        before: Option<String>,
+        after: Option<String>,
+    ) -> FieldResult<
+        Connection<
+            IndexCursor,
+            TransactionOutput,
+            ConnectionFields<TransactionOutputCount>,
+            EmptyFields,
+        >,
+    > {
+        let id = self.id.clone();
+        let txn = Arc::clone(&self.txn);
+        query(
+            after,
+            before,
+            first,
+            last,
+            move |after, before, first, last| async move {
+                tokio::task::spawn_blocking(move || {
+                    let mut outputs = txn
+                        .get_fragment_outputs(&id)
+                        .map_err(|_| ApiError::InternalDbError)?;
+
+                    let boundaries = outputs
+                        .first_cursor()
+                        .map(|first| {
+                            PaginationInterval::Inclusive(InclusivePaginationInterval {
+                                lower_bound: u64::from(*first),
+                                upper_bound: u64::from(*outputs.last_cursor().unwrap()),
+                            })
+                        })
+                        .unwrap_or(PaginationInterval::Empty);
+
+                    let pagination_arguments = ValidatedPaginationArguments {
+                        first,
+                        last,
+                        before: before.map(TryInto::try_into).transpose()?,
+                        after: after.map(TryInto::try_into).transpose()?,
+                    };
+
+                    let (range, page_meta) = compute_interval(boundaries, pagination_arguments)?;
+
+                    let mut connection = Connection::with_additional_fields(
+                        page_meta.has_previous_page,
+                        page_meta.has_next_page,
+                        ConnectionFields {
+                            total_count: page_meta.total_count.try_into().unwrap(),
+                        },
+                    );
+
+                    match range {
+                        PaginationInterval::Empty => (),
+                        PaginationInterval::Inclusive(range) => {
+                            let a = u8::try_from(range.lower_bound).unwrap();
+                            let b = range.upper_bound;
+
+                            outputs.seek(a).map_err(|_| ApiError::InternalDbError)?;
+
+                            // TODO: don't unwrap
+                            connection.append(
+                                outputs
+                                    .map(|i| i.unwrap())
+                                    .take_while(|(h, _)| (*h as u64) <= b)
+                                    .map(|(h, output)| {
+                                        Edge::new(
+                                            IndexCursor::from(h as u32),
+                                            TransactionOutput {
+                                                amount: output.value.get().into(),
+                                                address: Address {
+                                                    id: output.address.clone(),
+                                                },
+                                            },
+                                        )
+                                    }),
+                            );
+                        }
+                    };
+
+                    Ok::<
+                        Connection<
+                            IndexCursor,
+                            TransactionOutput,
+                            ConnectionFields<TransactionOutputCount>,
+                            EmptyFields,
+                        >,
+                        async_graphql::Error,
+                    >(connection)
+                })
+                .await
+                .unwrap()
+            },
+        )
+        .await
     }
 
     pub async fn certificate(
@@ -680,15 +970,19 @@ impl Query {
         context: &Context<'_>,
         length: ChainLength,
     ) -> FieldResult<Vec<Block>> {
-        let blocks = extract_context(&context)
-            .db
-            .get_txn()
-            .await
-            .map_err(|_| ApiError::InternalDbError)?
+        let txn = Arc::new(
+            extract_context(&context)
+                .db
+                .get_txn()
+                .await
+                .map_err(|_| ApiError::InternalDbError)?,
+        );
+
+        let blocks = txn
             .get_blocks_by_chain_length(&db::chain_storable::ChainLength::new(u32::from(length.0)))
             .map_err(|_| ApiError::InternalDbError)?
             .map(|i| {
-                i.map(|id| Block::from_valid_hash(id.clone()))
+                i.map(|id| Block::from_valid_hash(id.clone(), Arc::clone(&txn)))
                     .map_err(|_| ApiError::InternalError("iterator error".to_string()))
             })
             .collect::<Result<Vec<_>, ApiError>>()?;
@@ -701,24 +995,43 @@ impl Query {
     }
 
     /// get all current tips, sorted (descending) by their length
-    pub async fn branches(&self, context: &Context<'_>) -> Vec<Branch> {
-        extract_context(&context)
-            .db
-            .get_txn()
-            .await
-            .unwrap()
-            .get_branches()
-            .unwrap()
-            .map(|id| Branch {
-                id: id.unwrap().clone().into(),
-            })
-            .collect()
+    pub async fn branches(&self, context: &Context<'_>) -> FieldResult<Vec<Branch>> {
+        // extract_context(&context)
+        //     .db
+        //     .get_txn()
+        //     .await
+        //     .unwrap()
+        //     .get_branches()
+        //     .unwrap()
+        //     .map(|id| Branch {
+        //         id: id.unwrap().clone().into(),
+        //     })
+        //     .collect()
+        Err(ApiError::Unimplemented.into())
     }
 
     /// get the block that the ledger currently considers as the main branch's
     /// tip
-    async fn tip(&self, context: &Context<'_>) -> Branch {
-        todo!()
+    async fn tip(&self, context: &Context<'_>) -> FieldResult<Branch> {
+        let db = &extract_context(context).db;
+
+        let txn = db.get_txn().await.map_err(|_| ApiError::InternalDbError)?;
+
+        tokio::task::spawn_blocking(|| {
+            let id = txn
+                .get_branches()
+                .map_err(|_| ApiError::InternalDbError)?
+                .next()
+                .unwrap()?
+                .clone();
+
+            Ok(Branch {
+                id,
+                txn: Arc::new(txn),
+            })
+        })
+        .await
+        .unwrap()
     }
 
     pub async fn branch(&self, context: &Context<'_>, id: String) -> FieldResult<Branch> {

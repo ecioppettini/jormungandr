@@ -144,16 +144,16 @@ async fn main() -> Result<(), Error> {
 
         tracing::info!("starting rest task");
 
-        // let rest = tokio::spawn(
-        //     async {
-        //         rest_service(state_rx, settings).await;
-        //         Ok(())
-        //     }
-        //     .instrument(span!(Level::INFO, "rest service")),
-        // );
+        let rest = tokio::spawn(
+            async {
+                rest_service(state_rx, settings).await;
+                Ok(())
+            }
+            .instrument(span!(Level::INFO, "rest service")),
+        );
 
         // (bootstrap, vec![subscriptions, rest])
-        (bootstrap, vec![subscriptions])
+        (bootstrap, vec![subscriptions, rest])
     };
 
     let interrupt_handler = tokio::spawn({
@@ -246,7 +246,7 @@ async fn bootstrap(mut sync_stream: Streaming<chain_watch::Block>) -> Result<Exp
             .map_err(Error::UnrecoverableError)?;
 
         if let Some(ref db) = db {
-            tracing::trace!(
+            tracing::debug!(
                 "applying block {:?} {:?}",
                 block.header.hash(),
                 block.header.chain_length()
@@ -264,54 +264,54 @@ async fn bootstrap(mut sync_stream: Streaming<chain_watch::Block>) -> Result<Exp
     db.ok_or(BootstrapError::EmptyStream).map_err(Into::into)
 }
 
-// async fn rest_service(mut state: broadcast::Receiver<GlobalState>, settings: Settings) {
-//     tracing::info!("starting rest task, waiting for database to be ready");
-//
-//     let (rest_shutdown, rest_shutdown_signal) = oneshot::channel();
-//     let (indexer_tx, indexer_rx) = oneshot::channel();
-//
-//     tokio::spawn(async move {
-//         let mut indexer_tx = Some(indexer_tx);
-//         loop {
-//             match state.recv().await.unwrap() {
-//                 GlobalState::Bootstraping => continue,
-//                 GlobalState::Ready(i) => {
-//                     if let Some(indexer_tx) = indexer_tx.take() {
-//                         let _ = indexer_tx.send(i);
-//                     } else {
-//                         panic!("received ready event twice");
-//                     }
-//                 }
-//                 GlobalState::ShuttingDown => {
-//                     let _ = rest_shutdown.send(());
-//                     break;
-//                 }
-//             }
-//         }
-//     });
-//
-//     let db = indexer_rx.await.unwrap().db;
-//
-//     let api = api::filter(
-//         db,
-//         crate::db::Settings {
-//             address_bech32_prefix: settings.address_bech32_prefix,
-//         },
-//     );
-//
-//     let binding_address = settings.binding_address;
-//     let tls = settings.tls.clone();
-//     let cors = settings.cors.clone();
-//
-//     tracing::info!("starting rest task, listening on {}", binding_address);
-//
-//     api::setup_cors(api, binding_address, tls, cors, async {
-//         rest_shutdown_signal.await.unwrap()
-//     })
-//     .await;
-//
-//     tracing::info!("rest task finished");
-// }
+async fn rest_service(mut state: broadcast::Receiver<GlobalState>, settings: Settings) {
+    tracing::info!("starting rest task, waiting for database to be ready");
+
+    let (rest_shutdown, rest_shutdown_signal) = oneshot::channel();
+    let (indexer_tx, indexer_rx) = oneshot::channel();
+
+    tokio::spawn(async move {
+        let mut indexer_tx = Some(indexer_tx);
+        loop {
+            match state.recv().await.unwrap() {
+                GlobalState::Bootstraping => continue,
+                GlobalState::Ready(i) => {
+                    if let Some(indexer_tx) = indexer_tx.take() {
+                        let _ = indexer_tx.send(i);
+                    } else {
+                        panic!("received ready event twice");
+                    }
+                }
+                GlobalState::ShuttingDown => {
+                    let _ = rest_shutdown.send(());
+                    break;
+                }
+            }
+        }
+    });
+
+    let db = indexer_rx.await.unwrap().db;
+
+    let api = api::filter(
+        db,
+        crate::db::Settings {
+            address_bech32_prefix: settings.address_bech32_prefix,
+        },
+    );
+
+    let binding_address = settings.binding_address;
+    let tls = settings.tls.clone();
+    let cors = settings.cors.clone();
+
+    tracing::info!("starting rest task, listening on {}", binding_address);
+
+    api::setup_cors(api, binding_address, tls, cors, async {
+        rest_shutdown_signal.await.unwrap()
+    })
+    .await;
+
+    tracing::info!("rest task finished");
+}
 
 async fn process_subscriptions(
     state: broadcast::Receiver<GlobalState>,
@@ -342,6 +342,36 @@ async fn process_subscriptions(
     pin_mut!(blocks, tips, task_status_collector, state);
 
     loop {
+        let state = state
+            .recv()
+            .await
+            .expect("state broadcast channel doesn't have enough capacity");
+
+        match state {
+            GlobalState::Bootstraping => continue,
+            GlobalState::Ready(i) => {
+                indexer.replace(i.clone());
+                break;
+            }
+
+            GlobalState::ShuttingDown => {
+                status_collector_cancellation_token.cancel();
+
+                let e = task_status_collector
+                    .await
+                    .context("task status collector finished with error")
+                    .map_err(Error::Other)?;
+
+                tracing::error!("task status collector join error {:?}", e);
+
+                return Ok(());
+            }
+        }
+    }
+
+    let indexer = indexer.unwrap();
+
+    loop {
         select! {
             state = state.recv() => {
                 let state = state.expect("state broadcast channel doesn't have enough capacity");
@@ -349,27 +379,27 @@ async fn process_subscriptions(
                 tracing::trace!("got state message {:?}", state);
 
                 match state {
-                    GlobalState::Bootstraping => continue,
-                    GlobalState::Ready(i) => { indexer.replace(i.clone()); },
                     GlobalState::ShuttingDown => {
                         status_collector_cancellation_token.cancel();
                         break;
                     },
+                    _ => unreachable!(),
                 }
             },
             Some(block) = blocks.next() => {
                 let indexer = indexer.clone();
-                let handle = tokio::spawn(
-                    async move {
-                        future::ready(block)
-                            .map_err(|e| Error::Other(e.into()))
-                            .and_then(|block| handle_block(block, indexer))
-                            .await
-                    }
-                    .instrument(span!(Level::INFO, "handle_block")),
-                );
 
-                let _ = panic_tx.send(handle).await;
+                    let handle = tokio::spawn(
+                        async move {
+                            future::ready(block)
+                                .map_err(|e| Error::Other(e.into()))
+                                .and_then(|block| handle_block(block, indexer))
+                                .await
+                        }
+                        .instrument(span!(Level::INFO, "handle_block")),
+                    );
+
+                    let _ = panic_tx.send(handle).await;
             },
             Some(tip) = tips.next() => {
                 tracing::debug!("received tip event");
@@ -388,11 +418,11 @@ async fn process_subscriptions(
                 );
             },
             Some(error) = error_rx.recv() => {
-                tracing::debug!("received error event");
+                tracing::error!("received error event");
                 return Err(error);
             },
             e = &mut task_status_collector => {
-                tracing::debug!("received error from subtask {:?}", e);
+                tracing::error!("received error from subtask {:?}", e);
                 return e
                     .map_err(|e| Error::Other(e.into()))
                     .and_then(std::convert::identity);
@@ -401,7 +431,7 @@ async fn process_subscriptions(
         };
     }
 
-    tracing::debug!("finishing subscriptions service");
+    tracing::trace!("finishing subscriptions service");
 
     task_status_collector
         .await
@@ -409,28 +439,18 @@ async fn process_subscriptions(
         .map_err(Error::Other)?
 }
 
-async fn handle_block(
-    raw_block: chain_watch::Block,
-    indexer: Option<Indexer>,
-) -> Result<(), Error> {
+async fn handle_block(raw_block: chain_watch::Block, indexer: Indexer) -> Result<(), Error> {
     let reader = std::io::BufReader::new(raw_block.content.as_slice());
     let block = Block::deserialize(reader)
         .context("Failed to deserialize block from block subscription")
         .map_err(Error::Other)?;
 
-    if let Some(indexer) = indexer.as_ref() {
-        indexer.apply_block(block).await?;
-    } else {
-        tracing::trace!(
-            "ignoring block {} because database is bootstraping",
-            block.header.id()
-        );
-    }
+    indexer.apply_block(block).await?;
 
     Ok(())
 }
 
-async fn handle_tip(raw_tip: chain_watch::BlockId, indexer: Option<Indexer>) -> Result<(), Error> {
+async fn handle_tip(raw_tip: chain_watch::BlockId, indexer: Indexer) -> Result<(), Error> {
     let tip: [u8; 32] = raw_tip
         .content
         .as_slice()
@@ -438,9 +458,7 @@ async fn handle_tip(raw_tip: chain_watch::BlockId, indexer: Option<Indexer>) -> 
         .context("tip is not 32 bytes long")
         .map_err(Error::Other)?;
 
-    if let Some(indexer) = indexer.as_ref() {
-        indexer.set_tip(HeaderHash::from_bytes(tip)).await;
-    }
+    indexer.set_tip(HeaderHash::from_bytes(tip)).await;
 
     Ok(())
 }

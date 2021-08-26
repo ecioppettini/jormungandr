@@ -3,8 +3,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ExplorerError {
-    #[error("ancestor of block '{0}' not found in explorer")]
-    AncestorNotFound(HeaderHash),
+    #[error("ancestor of block '{0}' ('{1}') not found in explorer")]
+    AncestorNotFound(HeaderHash, HeaderHash),
     #[error("tried to index block '{0}' twice")]
     BlockAlreadyExists(HeaderHash),
     #[error(transparent)]
