@@ -1,7 +1,5 @@
 use super::{
-    chain_storable::{
-        AccountId, Address, BlockId, Choice, FragmentId, PoolId, PublicVoteCast, Stake,
-    },
+    chain_storable::{AccountId, Address, BlockId, FragmentId, PoolId, Stake},
     endian::L64,
     helpers::find_last_record_by,
     pair::Pair,
@@ -25,7 +23,7 @@ pub type BlocksInBranch = Db<ChainLength, BlockId>;
 pub type AddressId = SeqNum;
 pub type AddressIds = Db<Address, AddressId>;
 pub type AddressTransactions = Db<AddressId, Pair<SeqNum, FragmentId>>;
-pub type Votes = Db<ProposalId, Pair<SeqNum, Choice>>;
+pub type Votes = Db<ProposalId, Pair<SeqNum, FragmentId>>;
 
 // a typed (and in-memory) version of SerializedStateRef
 pub struct StateRef {
@@ -125,22 +123,15 @@ impl StateRef {
         }
     }
 
-    pub fn apply_public_vote(
+    pub fn apply_vote(
         &mut self,
         txn: &mut SanakirjaMutTx,
-        // vote_plan_id: &VotePlanId,
-        // proposal_index: u8,
-        // choice: Choice,
-        vote_cast: &PublicVoteCast,
+        fragment_id: &FragmentId,
+        proposal_id: &ProposalId,
     ) -> Result<(), ExplorerError> {
-        let proposal_id = ProposalId {
-            vote_plan: vote_cast.vote_plan_id.clone(),
-            index: vote_cast.proposal_index,
-        };
-
         let max_possible_value = Pair {
             a: SeqNum::MAX,
-            b: u8::MAX,
+            b: FragmentId::MAX,
         };
 
         let seq = find_last_record_by(txn, &self.votes, &proposal_id, &max_possible_value)
@@ -153,7 +144,7 @@ impl StateRef {
             &proposal_id,
             &Pair {
                 a: seq,
-                b: vote_cast.choice,
+                b: fragment_id.clone(),
             },
         )?;
 
@@ -324,7 +315,14 @@ impl StateRef {
         .unwrap();
     }
 
-    pub fn drop(self, txn: &mut SanakirjaMutTx) -> Result<(), ExplorerError> {
+    /// gc this fork so the allocated pages can be re-used
+    ///
+    /// # Safety
+    ///
+    /// It's important that any references to this particular state are not used anymore. For the
+    /// current use-case, callers need to ensure that this snapshot is not referenced anymore in
+    /// the `States` btree.
+    pub unsafe fn drop(self, txn: &mut SanakirjaMutTx) -> Result<(), ExplorerError> {
         let StateRef {
             stake_pool_blocks,
             stake_control,
@@ -332,7 +330,7 @@ impl StateRef {
             address_transactions,
             address_id,
             votes,
-            next_address_id,
+            next_address_id: _,
         } = self;
 
         btree::drop(txn, stake_pool_blocks)?;

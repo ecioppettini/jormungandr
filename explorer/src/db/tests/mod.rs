@@ -132,9 +132,13 @@ fn sanakirja_test() {
             .unwrap();
     }
 
+    mut_tx.set_tip(branch2_id.clone()).unwrap();
+
     mut_tx.commit().unwrap();
 
     let txn = pristine.txn_begin().unwrap();
+
+    assert_eq!(&txn.get_tip().unwrap(), &branch2_id);
 
     for (branch_id, branch) in model.get_state_refs() {
         for (address, fragments) in branch.transactions_by_address.iter() {
@@ -158,7 +162,7 @@ fn sanakirja_test() {
         .get_branches()
         .unwrap()
         .map(|result| result.unwrap())
-        .eq(model.get_branches().iter()));
+        .eq(model.get_branches().iter().rev()));
 
     for block in [&block0_id, &branch1_id, &branch2_id, &branch3_id] {
         assert_eq!(

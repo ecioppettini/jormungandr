@@ -18,7 +18,6 @@ use chain_impl_mockchain::block::HeaderId as HeaderHash;
 use sanakirja::{btree, direct_repr, Storable, UnsizedStorable};
 use std::path::Path;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 
 pub(crate) type P<K, V> = btree::page::Page<K, V>;
 type Db<K, V> = btree::Db<K, V>;
@@ -37,25 +36,12 @@ impl Pristine {
         Self::new_with_size(name, 1 << 20)
     }
 
-    pub unsafe fn new_nolock<P: AsRef<Path>>(name: P) -> Result<Self, ExplorerError> {
-        Self::new_with_size_nolock(name, 1 << 20)
-    }
-
     pub fn new_with_size<P: AsRef<Path>>(name: P, size: u64) -> Result<Self, ExplorerError> {
         let env = ::sanakirja::Env::new(name, size, 2);
         match env {
             Ok(env) => Ok(Pristine { env: Arc::new(env) }),
             Err(e) => Err(ExplorerError::SanakirjaError(e)),
         }
-    }
-
-    pub unsafe fn new_with_size_nolock<P: AsRef<Path>>(
-        name: P,
-        size: u64,
-    ) -> Result<Self, ExplorerError> {
-        Ok(Pristine {
-            env: Arc::new(::sanakirja::Env::new_nolock(name, size, 2)?),
-        })
     }
 
     pub fn new_anon() -> Result<Self, ExplorerError> {
@@ -75,24 +61,6 @@ pub struct Explorer {
 }
 
 #[derive(Clone)]
-struct Tip(Arc<RwLock<HeaderHash>>);
-
-// #[derive(Clone)]
-// pub struct ExplorerDb {
-//     /// Structure that keeps all the known states to allow easy branch management
-//     /// each new block is indexed by getting its previous `State` from the multiverse
-//     /// and inserted a new updated one.
-//     multiverse: Multiverse,
-//     /// This keeps track of the longest chain seen until now. All the queries are
-//     /// performed using the state of this branch, the HeaderHash is used as key for the
-//     /// multiverse, and the ChainLength is used in the updating process.
-//     longest_chain_tip: Tip,
-//     pub blockchain_config: BlockchainConfig,
-//     stable_store: StableIndex,
-//     tip_broadcast: tokio::sync::broadcast::Sender<(HeaderHash, multiverse::Ref)>,
-// }
-
-#[derive(Clone)]
 pub struct ExplorerDb {
     pristine: Pristine,
 }
@@ -106,9 +74,19 @@ pub struct Settings {
     pub address_bech32_prefix: String,
 }
 
-impl ExplorerDb {
-    pub fn bootstrap(block0: Block) -> Result<Self, ExplorerError> {
-        let pristine = Pristine::new_anon()?;
+pub enum OpenDb {
+    Initialized {
+        db: ExplorerDb,
+        last_stable_block: u32,
+    },
+    NeedsBootstrap(NeedsBootstrap),
+}
+
+pub struct NeedsBootstrap(Pristine);
+
+impl NeedsBootstrap {
+    pub fn add_block0(self, block0: Block) -> Result<ExplorerDb, ExplorerError> {
+        let pristine = self.0;
 
         let mut mut_tx = pristine.mut_txn_begin()?;
 
@@ -119,14 +97,31 @@ impl ExplorerDb {
 
         mut_tx.commit()?;
 
-        Ok(Self { pristine })
+        Ok(ExplorerDb { pristine })
+    }
+}
+
+impl ExplorerDb {
+    pub fn open() -> Result<OpenDb, ExplorerError> {
+        let pristine = Pristine::new("explorer-storage")?;
+
+        let txn = pristine.txn_begin();
+
+        match txn {
+            Ok(txn) => Ok(OpenDb::Initialized {
+                last_stable_block: txn.get_last_stable_block().get(),
+                db: ExplorerDb { pristine },
+            }),
+            Err(ExplorerError::UnitializedDatabase) => {
+                Ok(OpenDb::NeedsBootstrap(NeedsBootstrap(pristine)))
+            }
+            Err(e) => Err(e),
+        }
     }
 
-    /// Try to add a new block to the indexes, this can fail if the parent of the block is
-    /// not processed. Also, update the longest seen chain with this block as tip if its
-    /// chain length is greater than the current.
-    /// This doesn't perform any validation on the given block and the previous state, it
-    /// is assumed that the Block is valid
+    /// Try to add a new block to the indexes, this can fail if the parent of the block is not
+    /// processed. This doesn't perform any validation on the given block and the previous state,
+    /// it is assumed that the Block is valid
     pub async fn apply_block(&self, block: Block) -> Result<(), ExplorerError> {
         let pristine = self.pristine.clone();
         tokio::task::spawn_blocking(move || {
@@ -159,8 +154,21 @@ impl ExplorerDb {
         .unwrap()
     }
 
-    pub async fn set_tip(&self, hash: HeaderHash) -> bool {
-        true
+    pub async fn set_tip(&self, hash: HeaderHash) -> Result<bool, ExplorerError> {
+        let pristine = self.pristine.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut mut_tx = pristine.mut_txn_begin()?;
+
+            let status = mut_tx.set_tip(hash.into())?;
+
+            if status {
+                mut_tx.commit()?;
+            }
+
+            Ok(status)
+        })
+        .await
+        .unwrap()
     }
 }
 
