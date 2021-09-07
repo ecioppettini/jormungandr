@@ -545,7 +545,7 @@ impl Model {
         self.block_meta.insert(
             block_id.clone(),
             BlockMeta {
-                chain_length: chain_length.clone(),
+                chain_length: *chain_length,
                 date: block_date.clone(),
                 parent_hash: parent_id.clone(),
             },

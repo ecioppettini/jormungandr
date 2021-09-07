@@ -51,6 +51,7 @@ pub struct Settings {
     pub tls: Option<Tls>,
     pub cors: Option<Cors>,
     pub log_settings: Option<LogSettings>,
+    pub storage: Option<PathBuf>,
 }
 
 impl Settings {
@@ -84,6 +85,8 @@ impl Settings {
 
         let log_settings = Some(Self::log_settings(&cmd, &file));
 
+        let storage = cmd.storage.or(file.storage);
+
         let tls = file.tls;
         let cors = file.cors;
 
@@ -94,6 +97,7 @@ impl Settings {
             tls,
             cors,
             log_settings,
+            storage,
         })
     }
 
@@ -168,6 +172,7 @@ struct CommandLine {
     #[structopt(long)]
     pub address_bech32_prefix: Option<String>,
     pub config: Option<PathBuf>,
+    pub storage: Option<PathBuf>,
     /// Set log messages minimum severity. If not configured anywhere, defaults to "info".
     #[structopt(
         long = "log-level",

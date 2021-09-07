@@ -8,7 +8,7 @@ use crate::db::{
     endian::B32,
     schema::Txn,
     tests::model::TransactionSpec,
-    Pristine,
+    ExplorerDb,
 };
 use chain_addr::{self, Discrimination, Kind};
 use chain_core::property::Fragment as _;
@@ -23,7 +23,7 @@ use std::iter::FromIterator;
 
 #[test]
 fn sanakirja_test() {
-    let pristine = Pristine::new_anon().unwrap();
+    let pristine = ExplorerDb::new_anon().unwrap();
     let mut model = model::Model::new();
 
     let mut mut_tx = pristine.mut_txn_begin().unwrap();
@@ -132,7 +132,7 @@ fn sanakirja_test() {
             .unwrap();
     }
 
-    mut_tx.set_tip(branch2_id.clone()).unwrap();
+    mut_tx.set_tip(&branch2_id).unwrap();
 
     mut_tx.commit().unwrap();
 
@@ -195,13 +195,13 @@ fn sanakirja_test() {
                 Fragment::UpdateProposal(_) => {}
                 Fragment::UpdateVote(_) => {}
                 Fragment::OldUtxoDeclaration(_) => {}
-                Fragment::Transaction(tx) => assert_transaction(&txn, fragment_id, tx),
-                Fragment::OwnerStakeDelegation(tx) => assert_transaction(&txn, fragment_id, tx),
-                Fragment::StakeDelegation(tx) => assert_transaction(&txn, fragment_id, tx),
-                Fragment::PoolRegistration(tx) => assert_transaction(&txn, fragment_id, tx),
-                Fragment::PoolRetirement(tx) => assert_transaction(&txn, fragment_id, tx),
-                Fragment::PoolUpdate(tx) => assert_transaction(&txn, fragment_id, tx),
-                Fragment::VotePlan(tx) => assert_transaction(&txn, fragment_id, tx),
+                Fragment::Transaction(tx) => assert_transaction(&txn, &fragment_id, tx),
+                Fragment::OwnerStakeDelegation(tx) => assert_transaction(&txn, &fragment_id, tx),
+                Fragment::StakeDelegation(tx) => assert_transaction(&txn, &fragment_id, tx),
+                Fragment::PoolRegistration(tx) => assert_transaction(&txn, &fragment_id, tx),
+                Fragment::PoolRetirement(tx) => assert_transaction(&txn, &fragment_id, tx),
+                Fragment::PoolUpdate(tx) => assert_transaction(&txn, &fragment_id, tx),
+                Fragment::VotePlan(tx) => assert_transaction(&txn, &fragment_id, tx),
                 Fragment::VoteCast(tx) => {
                     let vote_cast = tx.as_slice().payload().into_payload();
 
@@ -218,10 +218,10 @@ fn sanakirja_test() {
                         public_vote_cast.vote_plan_id
                     );
 
-                    assert_transaction(&txn, fragment_id, tx)
+                    assert_transaction(&txn, &fragment_id, tx)
                 }
-                Fragment::VoteTally(tx) => assert_transaction(&txn, fragment_id, tx),
-                Fragment::EncryptedVoteTally(tx) => assert_transaction(&txn, fragment_id, tx),
+                Fragment::VoteTally(tx) => assert_transaction(&txn, &fragment_id, tx),
+                Fragment::EncryptedVoteTally(tx) => assert_transaction(&txn, &fragment_id, tx),
             }
 
             fn assert_transaction<P>(
