@@ -133,7 +133,7 @@ fn document(path: &Path, inner: &InnerController) -> Result<(), Error> {
 }
 
 impl MonitorController {
-    fn new(controller: InnerController, context: Context) -> Result<Self, Error> {
+    pub fn new(controller: InnerController, context: Context) -> Result<Self, Error> {
         let progress_bar = Arc::new(MultiProgress::new());
 
         Ok(Self {
