@@ -278,6 +278,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2dabbe35f96fb9507f7330793dc490461b2962659ac5d427181e451a623751d1"
 
 [[package]]
+name = "bech32"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf9ff0bbfd639f15c74af777d81383cf53efb7c93613f6cab67c6c11e05bbf8b"
+
+[[package]]
 name = "bincode"
 version = "1.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -466,7 +472,7 @@ name = "chain-addr"
 version = "0.1.0"
 source = "git+https://github.com/input-output-hk/chain-libs.git?branch=master#8b051298e4dd74ed7314f10b81a341439e7e219d"
 dependencies = [
- "bech32",
+ "bech32 0.7.3",
  "chain-core",
  "chain-crypto",
  "cryptoxide",
@@ -486,7 +492,7 @@ name = "chain-crypto"
 version = "0.1.0"
 source = "git+https://github.com/input-output-hk/chain-libs.git?branch=master#8b051298e4dd74ed7314f10b81a341439e7e219d"
 dependencies = [
- "bech32",
+ "bech32 0.7.3",
  "cryptoxide",
  "curve25519-dalek-ng",
  "digest 0.9.0",
@@ -1800,7 +1806,7 @@ version = "0.12.0-dev"
 dependencies = [
  "assert_fs",
  "base64 0.13.0",
- "bech32",
+ "bech32 0.8.1",
  "bincode",
  "bytes",
  "chain-addr",
@@ -1838,7 +1844,7 @@ dependencies = [
  "async-graphql-warp",
  "async-trait",
  "base64 0.13.0",
- "bech32",
+ "bech32 0.8.1",
  "bincode",
  "cardano-legacy-address",
  "chain-addr",
@@ -1896,7 +1902,7 @@ dependencies = [
  "assert_cmd",
  "assert_fs",
  "base64 0.13.0",
- "bech32",
+ "bech32 0.8.1",
  "chain-addr",
  "chain-core",
  "chain-crypto",
@@ -1939,7 +1945,7 @@ name = "jormungandr-lib"
 version = "0.12.0-dev"
 dependencies = [
  "base64 0.13.0",
- "bech32",
+ "bech32 0.8.1",
  "bincode",
  "cardano-legacy-address",
  "chain-addr",
@@ -2015,7 +2021,7 @@ version = "0.12.0-dev"
 dependencies = [
  "assert_fs",
  "base64 0.13.0",
- "bech32",
+ "bech32 0.8.1",
  "bincode",
  "bytesize",
  "cardano-legacy-address",
@@ -2080,7 +2086,7 @@ source = "git+https://github.com/input-output-hk/jortestkit.git?branch=master#e0
 dependencies = [
  "assert_fs",
  "base64 0.12.3",
- "bech32",
+ "bech32 0.7.3",
  "bytesize",
  "chrono",
  "console 0.11.3",
