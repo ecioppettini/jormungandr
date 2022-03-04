@@ -108,6 +108,7 @@ jobs:
           - os: ubuntu-latest
             profile: debug
             toolchain: nightly
+        bucket: [1, 2, 3, 4]
     env:
       RUSTFLAGS: -D warnings
       RUST_BACKTRACE: 1
@@ -170,6 +171,12 @@ jobs:
             ~/.cargo/git/db
           key: cargo-deps-v1-${{ needs.cache_info.outputs.cargo-lock-hash }}
 
+      - name: Install nextest
+        uses: actions-rs/install@v0.1
+        with:
+          crate: cargo-nextest
+          use-tool-cache: true
+
       - name: Build jormungandr
         uses: actions-rs/cargo@v1
         timeout-minutes: 30
@@ -199,8 +206,8 @@ jobs:
         uses: actions-rs/cargo@v1
         timeout-minutes: 90
         with:
-          command: test
-          args: --tests ${{ env.CARGO_FLAGS }}
+          command: nextest
+          args: run --partition count:1/4 --tests ${{ env.CARGO_FLAGS }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # TMPDIR and TMP are used respectively on unix and windows
@@ -213,8 +220,8 @@ jobs:
         uses: actions-rs/cargo@v1
         timeout-minutes: 90
         with:
-          command: test
-          args: --tests ${{ env.CARGO_FLAGS }} --features network
+          command: nextest
+          args: run --partition count:1/4 --tests ${{ env.CARGO_FLAGS }} --features network
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # TMPDIR and TMP are used respectively on unix and windows
