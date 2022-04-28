@@ -759,7 +759,7 @@ name = "chain-vote"
 version = "0.1.0"
 source = "git+https://github.com/input-output-hk/chain-libs.git?branch=master#1626503c539d31925fcd99c2683edc4f73ee15a6"
 dependencies = [
- "cfg-if 0.1.10",
+ "cfg-if 1.0.0",
  "chain-core",
  "chain-crypto",
  "const_format",
@@ -2380,7 +2380,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "strum",
- "sysinfo 0.23.1",
+ "sysinfo 0.23.11",
  "tar",
  "tempfile",
  "thiserror",
@@ -4466,9 +4466,9 @@ dependencies = [
 
 [[package]]
 name = "sysinfo"
-version = "0.23.1"
+version = "0.23.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bb29fc86b56b6d432ecdbbff2e5726aeaa69bf1bb48ddd994432b60d8bccd01"
+checksum = "3bf915673a340ee41f2fc24ad1286c75ea92026f04b65a0d0e5132d80b95fc61"
 dependencies = [
  "cfg-if 1.0.0",
  "core-foundation-sys",
