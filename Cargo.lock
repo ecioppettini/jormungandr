@@ -759,7 +759,7 @@ name = "chain-vote"
 version = "0.1.0"
 source = "git+https://github.com/input-output-hk/chain-libs.git?branch=master#1626503c539d31925fcd99c2683edc4f73ee15a6"
 dependencies = [
- "cfg-if 0.1.10",
+ "cfg-if 1.0.0",
  "chain-core",
  "chain-crypto",
  "const_format",
@@ -2380,7 +2380,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "strum",
- "sysinfo 0.23.1",
+ "sysinfo 0.26.6",
  "tar",
  "tempfile",
  "thiserror",
@@ -2785,7 +2785,7 @@ dependencies = [
  "libc",
  "log",
  "miow",
- "ntapi",
+ "ntapi 0.3.6",
  "winapi",
 ]
 
@@ -2929,6 +2929,15 @@ name = "ntapi"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f6bb902e437b6d86e03cce10a7e2af662292c5dfef23b65899ea3ac9354ad44"
+dependencies = [
+ "winapi",
+]
+
+[[package]]
+name = "ntapi"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc51db7b362b205941f71232e56c625156eb9a929f8cf74a428fd5bc094a4afc"
 dependencies = [
  "winapi",
 ]
@@ -4458,7 +4467,7 @@ dependencies = [
  "cfg-if 0.1.10",
  "doc-comment",
  "libc",
- "ntapi",
+ "ntapi 0.3.6",
  "once_cell",
  "rayon",
  "winapi",
@@ -4466,14 +4475,14 @@ dependencies = [
 
 [[package]]
 name = "sysinfo"
-version = "0.23.1"
+version = "0.26.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bb29fc86b56b6d432ecdbbff2e5726aeaa69bf1bb48ddd994432b60d8bccd01"
+checksum = "c6d0dedf2e65d25b365c588382be9dc3a3ee4b0ed792366cf722d174c359d948"
 dependencies = [
  "cfg-if 1.0.0",
  "core-foundation-sys",
  "libc",
- "ntapi",
+ "ntapi 0.4.0",
  "once_cell",
  "rayon",
  "winapi",
